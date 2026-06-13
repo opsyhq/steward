@@ -52,6 +52,7 @@ import { spawn, spawnSync } from "child_process";
 import {
 	APP_NAME,
 	APP_TITLE,
+	CONFIG_DIR_NAME,
 	getAgentDir,
 	getAuthPath,
 	getDebugLogPath,
@@ -673,7 +674,7 @@ export class InteractiveMode {
 			);
 			const onboarding = theme.fg(
 				"dim",
-				`Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.`,
+				`${APP_TITLE} can explain its own features and look up its docs. Ask it how to use or extend ${APP_TITLE}.`,
 			);
 			this.builtInHeader = new ExpandableText(
 				() => `${logo}\n${compactInstructions}\n${compactOnboarding}\n\n${onboarding}`,
@@ -883,7 +884,7 @@ export class InteractiveMode {
 		}
 
 		if (extendedKeysFormat === "xterm") {
-			return "tmux extended-keys-format is xterm. Pi works best with csi-u. Add `set -g extended-keys-format csi-u` to ~/.tmux.conf and restart tmux.";
+			return `tmux extended-keys-format is xterm. ${APP_TITLE} works best with csi-u. Add \`set -g extended-keys-format csi-u\` to ~/.tmux.conf and restart tmux.`;
 		}
 
 		return undefined;
@@ -3282,7 +3283,7 @@ export class InteractiveMode {
 			new Text(
 				theme.fg(
 					"warning",
-					"This project is not trusted. Project .pi resources and packages are ignored. Use /trust to save a trust decision, then restart pi.",
+					`This project is not trusted. Project ${CONFIG_DIR_NAME} resources and packages are ignored. Use /trust to save a trust decision, then restart ${APP_NAME}.`,
 				),
 				1,
 				0,
