@@ -1,0 +1,30 @@
+{
+	"name": "steward",
+	"private": true,
+	"type": "module",
+	"packageManager": "pnpm@10.33.0",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"scripts": {
+		"clean": "pnpm -r clean",
+		"build": "pnpm -r build",
+		"typecheck": "tsgo -p tsconfig.json --noEmit",
+		"test": "pnpm -r test",
+		"lint": "biome check .",
+		"format": "biome check --write ."
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.3.5",
+		"@types/node": "24.12.4",
+		"@typescript/native-preview": "7.0.0-dev.20260120.1",
+		"shx": "0.4.0",
+		"typescript": "5.9.3"
+	},
+	"pnpm": {
+		"overrides": {
+			"rimraf": "6.1.2",
+			"gaxios>rimraf": "6.1.2"
+		}
+	}
+}

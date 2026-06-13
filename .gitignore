@@ -1,0 +1,22 @@
+node_modules/
+dist/
+packages/*/dist/
+*.tsbuildinfo
+*.log
+*.cpuprofile
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Environment
+.env
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+.zed/
+*.swp
+*.swo
+*~
