@@ -8,6 +8,8 @@
  */
 
 import { createInterface } from "node:readline";
+import type { AgentHarness } from "@opsyhq/agent";
+import type { NodeExecutionEnv } from "@opsyhq/agent/node";
 import { type Args, parseArgs, printHelp } from "./cli/args.ts";
 import { APP_NAME, getAgentDir, VERSION } from "./config.ts";
 import {
@@ -175,12 +177,17 @@ async function runSession(name: string, positionals: string[], args: Args): Prom
 		return runPrintMode(harness, { message });
 	}
 
-	// Interactive: loop so an in-chat commission can restart into a fresh session.
-	let fresh = args.new;
-	while (true) {
-		// Re-read: commissionedAt may have changed since the previous iteration.
+	// Interactive: one long-lived TUI. A fresh harness is built up front and
+	// rebuilt on demand (e.g. after commissioning) via `restartSession`, which
+	// swaps the session in place — the TUI is never torn down or re-looped.
+	// Mirrors coding-agent's `runtimeHost.newSession()`.
+	let currentEnv: NodeExecutionEnv | undefined;
+	const openHarness = async (fresh: boolean): Promise<AgentHarness> => {
+		const previousEnv = currentEnv;
+		// Re-read: commissionedAt may have changed since the previous harness.
 		const config = loadAgentConfig(name);
 		const { session, env } = await openAgentSession(name, { fresh });
+		currentEnv = env;
 
 		// Read curated files ONCE and freeze them into the prompt. Mid-session edits
 		// (memory tool / bash) persist to disk but only enter the prompt next session.
@@ -196,15 +203,19 @@ async function runSession(name: string, positionals: string[], args: Args): Prom
 			tools: [createMemoryTool(name), createBashTool(env, getAgentDir(name))],
 			authStorage,
 		});
+		// Release the superseded session's env once the new one is live.
+		await previousEnv?.cleanup();
+		return harness;
+	};
 
-		const { restart } = await new InteractiveMode(harness, {
-			name,
-			purpose: config.purpose,
-			commissioned: isCommissioned(config),
-		}).run();
-		if (!restart) break;
-		fresh = true; // commissioned → start a clean session (birth instruction gone)
-	}
+	const harness = await openHarness(args.new ?? false);
+	await new InteractiveMode(harness, {
+		name,
+		purpose: initialConfig.purpose,
+		commissioned: isCommissioned(initialConfig),
+		restartSession: () => openHarness(true),
+	}).run();
+	await currentEnv?.cleanup();
 	return 0;
 }
 
