@@ -5,10 +5,9 @@
  * options)`, `run()`, `stop()`) but stays minimal: it bridges the `AgentHarness`
  * event stream onto a small retained-mode component tree (a chat log `Container`, a
  * status `Container` holding a `Loader`, and an `Editor`). Streaming assistant text
- * is routed through an `AssistantMessageComponent` (vendored from
- * `@opsyhq/coding-agent`), whose `updateContent(message)` is called in place on each
- * delta so the prefix cache and the renderer both stay warm — and so thinking blocks
- * render in order rather than being dropped.
+ * is routed through an `AssistantMessageComponent`, whose `updateContent(message)` is
+ * called in place on each delta so the prefix cache and the renderer both stay warm —
+ * and so thinking blocks render in order rather than being dropped.
  *
  * Subscribe handlers must stay fast and non-throwing — a throw inside one surfaces as
  * an `AgentHarnessError("hook")` and would abort the turn.
@@ -29,15 +28,18 @@ import {
 	Text,
 	TUI,
 } from "@opsyhq/tui";
-import { commissionAgent, isCommissioned } from "../../core/agent-config.ts";
+import { getSoulPath } from "../../config.ts";
+import { deployAgent, isDeployed } from "../../core/agent-config.ts";
 import { executeBashWithOperations } from "../../core/bash-executor.ts";
 import { KeybindingsManager } from "../../core/keybindings.ts";
+import { readMemoryFile } from "../../core/memory.ts";
 import type { SessionHost } from "../../core/session-host.ts";
 import { createLocalBashOperations } from "../../core/tools/bash.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { isFailureMessage } from "../message.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
+import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { rawKeyHint } from "./components/keybinding-hints.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
@@ -45,6 +47,30 @@ import { getEditorTheme, getMarkdownTheme, initTheme, theme } from "./theme/them
 
 /** Window (ms) within which a second Ctrl+C quits instead of clearing the editor. */
 const CTRL_C_EXIT_WINDOW_MS = 500;
+
+/**
+ * Sent to the agent when the human types `/deploy` before the agent has authored
+ * its SOUL.md — it nudges the agent to call the deploy tool. The `/deploy` itself
+ * is the human's consent, so the follow-up confirm is skipped (deployPreApproved).
+ */
+const DEPLOY_INSTRUCTION =
+	"Your human asked you to deploy. If you're ready, call the deploy tool now with your distilled purpose and final SOUL.md.";
+
+/**
+ * Mirrors `@opsyhq/coding-agent`'s `InteractiveModeOptions` (constructor opts
+ * decided by the CLI/main layer and read in the startup method — pi's pattern for
+ * `initialMessage`/`initialMessages`). steward's analogue is `initialAssistantMessage`:
+ * pi's `initialMessage` seeds a *user* prompt and runs a turn, whereas a newly born
+ * agent opens the chat itself, so the message is seeded as an *assistant* turn with
+ * no model round-trip. The text is decided at the top (`main.ts`), not here.
+ */
+export interface InteractiveModeOptions {
+	/**
+	 * Seed an assistant message into the session on startup and render it, with no
+	 * model turn. `main.ts` sets it to the birth opener for a freshly created agent.
+	 */
+	initialAssistantMessage?: string;
+}
 
 function isAssistantMessage(message: AgentMessage): message is AssistantMessage {
 	return (message as { role?: string }).role === "assistant";
@@ -61,6 +87,7 @@ function isExpandable(obj: unknown): obj is Expandable {
 
 export class InteractiveMode {
 	private readonly sessionHost: SessionHost;
+	private readonly options: InteractiveModeOptions;
 	private readonly ui: TUI;
 	private readonly chatContainer: Container;
 	private readonly statusContainer: Container;
@@ -88,11 +115,23 @@ export class InteractiveMode {
 	private isBashMode = false;
 	private bashComponent?: BashExecutionComponent;
 	private bashAbortController?: AbortController;
+	// Deploy flow state. The deploy tool (forming-only) writes the agent's purpose +
+	// SOUL.md but does NOT flip the latch — the human confirms here, symmetric with
+	// SOUL being written-but-unconfirmed. `extensionSelector` is the Yes/No dialog
+	// (see showExtensionConfirm). `deployPreApproved` is set when the human
+	// typed `/deploy` (their consent is implicit, so the confirm is skipped).
+	// `deployToolCallId`/`deployToolErrored` track the in-flight deploy tool
+	// call so agent_end knows it ran and whether it succeeded.
+	private extensionSelector?: ExtensionSelectorComponent;
+	private deployPreApproved = false;
+	private deployToolCallId?: string;
+	private deployToolErrored = false;
 
-	constructor(host: SessionHost) {
+	constructor(host: SessionHost, options: InteractiveModeOptions = {}) {
 		this.sessionHost = host;
-		// The theme proxy and keybinding hints used by the vendored tool renderers
-		// throw unless initialized first; do it before any styling runs.
+		this.options = options;
+		// The theme proxy and keybinding hints used by the tool renderers throw
+		// unless initialized first; do it before any styling runs.
 		initTheme();
 		setKeybindings(KeybindingsManager.create());
 		this.ui = new TUI(new ProcessTerminal());
@@ -112,7 +151,7 @@ export class InteractiveMode {
 		this.loader.stop();
 	}
 
-	/** The live harness, sourced from the session host (swapped on commission). */
+	/** The live harness, sourced from the session host (swapped on deploy). */
 	private get harness(): AgentHarness {
 		return this.sessionHost.harness;
 	}
@@ -143,9 +182,35 @@ export class InteractiveMode {
 		this.ui.setFocus(this.editor);
 		this.ui.start();
 
+		// Mirrors pi's startup read of `this.options.initialMessage` (interactive-mode.ts:796),
+		// but seeds an assistant opener instead of running a user turn: a newly born agent
+		// opens the chat itself. Fire-and-forget — run() returns the exit promise.
+		if (this.options.initialAssistantMessage) {
+			void this.seedInitialAssistantMessage(this.options.initialAssistantMessage);
+		}
+
 		return new Promise<void>((resolve) => {
 			this.resolveExit = resolve;
 		});
+	}
+
+	/**
+	 * Persist + render the agent's opening assistant message (the birth opener). The
+	 * message is appended to the session via the host so it survives resume, then
+	 * rendered through the same `AssistantMessageComponent` the stream uses. Only the
+	 * birth path passes `initialAssistantMessage`, so resumes never re-seed it.
+	 */
+	private async seedInitialAssistantMessage(text: string): Promise<void> {
+		try {
+			const message = await this.sessionHost.seedAssistantMessage(text);
+			const component = new AssistantMessageComponent(undefined, false, this.markdownTheme);
+			component.updateContent(message);
+			this.chatContainer.addChild(component);
+			this.chatContainer.addChild(new Spacer(1));
+		} catch (error) {
+			this.appendErrorLine(error instanceof Error ? error.message : String(error));
+		}
+		this.ui.requestRender();
 	}
 
 	/** (Re)subscribe to the current harness's event stream. */
@@ -172,10 +237,8 @@ export class InteractiveMode {
 		if (trimmedPurpose) {
 			lines.push(theme.fg("dim", trimmedPurpose));
 		}
-		if (!isCommissioned(config)) {
-			lines.push(
-				theme.fg("dim", "Forming — it will ask to be commissioned; type /commission to finalize manually."),
-			);
+		if (!isDeployed(config)) {
+			lines.push(theme.fg("dim", "Forming — it'll ask to deploy when ready, or type /deploy."));
 		}
 		// pi's `rawKeyHint("!", "to run bash")` / `rawKeyHint("!!", "to run bash (no
 		// context)")` (interactive-mode.ts:657-658), joined with pi's compact " · "
@@ -193,10 +256,12 @@ export class InteractiveMode {
 		const trimmed = text.trim();
 		if (trimmed.length === 0 || this.busy) return;
 
-		// Slash commands are intercepted before reaching the model.
-		if (trimmed === "/commission" || trimmed === "/finalize") {
+		// Slash commands are intercepted before reaching the model. `/deploy` is the
+		// human's go-ahead to deploy; it takes no arguments — the agent authors its
+		// own purpose.
+		if (trimmed === "/deploy") {
 			this.editor.setText("");
-			await this.handleCommissionCommand();
+			await this.handleDeployCommand();
 			return;
 		}
 
@@ -239,20 +304,75 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * `/commission` — flip the human-held latch, then swap to a fresh session in
-	 * place via the session host (like coding-agent's `/new` →
-	 * `runtimeHost.newSession()`): unsubscribe from the old harness, have the host
-	 * build a new one whose frozen prompt no longer carries the birth instruction,
-	 * and re-subscribe. The TUI is never torn down.
+	 * `/deploy` — the human's go-ahead to deploy. If the agent has already authored
+	 * its SOUL.md (called the deploy tool), this is the final confirm and we deploy
+	 * now. Otherwise it nudges the agent to call the deploy tool; either way
+	 * `deployPreApproved` records the consent so the post-tool confirm is skipped.
 	 */
-	private async handleCommissionCommand(): Promise<void> {
-		if (isCommissioned(this.sessionHost.config)) {
-			this.appendErrorLine("Already commissioned.");
+	private async handleDeployCommand(): Promise<void> {
+		if (isDeployed(this.sessionHost.config)) {
+			this.appendErrorLine("Already deployed.");
 			this.ui.requestRender();
 			return;
 		}
+		this.deployPreApproved = true;
 
-		commissionAgent(this.sessionHost.config.name);
+		// SOUL.md already written → the human's /deploy is the final go-ahead.
+		if (this.soulIsReady()) {
+			await this.doDeploy();
+			return;
+		}
+
+		// Not ready yet → nudge the agent to author its purpose + SOUL.md via the
+		// deploy tool. `deployPreApproved` means finalizeDeploy won't re-ask to confirm.
+		this.appendUserMessage("/deploy");
+		this.statusContainer.clear();
+		this.ui.requestRender();
+		try {
+			await this.harness.prompt(DEPLOY_INSTRUCTION);
+		} catch (error) {
+			if (error instanceof AgentHarnessError && error.code === "busy") return;
+			this.appendErrorLine(error instanceof Error ? error.message : String(error));
+			this.ui.requestRender();
+		}
+	}
+
+	/** True once the agent has authored a non-empty SOUL.md (via the deploy tool). */
+	private soulIsReady(): boolean {
+		return readMemoryFile(getSoulPath(this.sessionHost.config.name)).trim().length > 0;
+	}
+
+	/**
+	 * Called at agent_end when the deploy tool ran successfully. If the human hasn't
+	 * pre-approved (no `/deploy`), confirm with a Yes/No dialog; otherwise deploy.
+	 */
+	private async finalizeDeploy(): Promise<void> {
+		this.deployToolCallId = undefined;
+		if (!this.deployPreApproved) {
+			const confirmed = await this.showExtensionConfirm(
+				`Deploy "${this.sessionHost.config.name}"?`,
+				"Its purpose and SOUL.md are written. Deploying starts a fresh session.",
+			);
+			if (!confirmed) {
+				this.chatContainer.addChild(
+					new Text(theme.fg("dim", "Deploy cancelled — keep forming, or /deploy when ready."), 1, 0),
+				);
+				this.ui.requestRender();
+				return;
+			}
+		}
+		await this.doDeploy();
+	}
+
+	/**
+	 * Flip the human-held latch, then swap to a fresh session in place via the session
+	 * host (like coding-agent's `/new` → `runtimeHost.newSession()`): unsubscribe from
+	 * the old harness, have the host build a new one whose frozen prompt no longer
+	 * carries the birth instruction, and re-subscribe. The TUI is never torn down.
+	 */
+	private async doDeploy(): Promise<void> {
+		const name = this.sessionHost.config.name;
+		deployAgent(name);
 		this.unsubscribe?.();
 		try {
 			// On success the host swaps in the new harness; on failure it keeps the old.
@@ -271,10 +391,57 @@ export class InteractiveMode {
 		this.bashAbortController?.abort();
 		this.bashAbortController = undefined;
 		this.bashComponent = undefined;
+		this.deployPreApproved = false;
+		this.deployToolCallId = undefined;
+		this.deployToolErrored = false;
 		this.setBusy(false);
-		this.chatContainer.addChild(new Text(theme.fg("dim", "✓ Commissioned — fresh session started."), 1, 0));
+		this.chatContainer.addChild(new Text(theme.fg("dim", "✓ Deployed — fresh session started."), 1, 0));
 		this.ui.setFocus(this.editor);
 		this.ui.requestRender();
+	}
+
+	/**
+	 * Show the Yes/No selector dialog: swap the editor for the selector in
+	 * `editorContainer`, focus it (the TUI then routes input to it), and resolve when
+	 * the user picks or cancels. No signal/timeout — steward drives this only for the
+	 * deploy confirm, which neither aborts nor times out.
+	 */
+	private showExtensionSelector(title: string, options: string[]): Promise<string | undefined> {
+		return new Promise((resolve) => {
+			this.extensionSelector = new ExtensionSelectorComponent(
+				title,
+				options,
+				(option) => {
+					this.hideExtensionSelector();
+					resolve(option);
+				},
+				() => {
+					this.hideExtensionSelector();
+					resolve(undefined);
+				},
+				{ tui: this.ui, onToggleToolsExpanded: () => this.toggleToolOutputExpansion() },
+			);
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.extensionSelector);
+			this.ui.setFocus(this.extensionSelector);
+			this.ui.requestRender();
+		});
+	}
+
+	/** Hide the selector and restore the editor. */
+	private hideExtensionSelector(): void {
+		this.extensionSelector?.dispose();
+		this.editorContainer.clear();
+		this.editorContainer.addChild(this.editor);
+		this.extensionSelector = undefined;
+		this.ui.setFocus(this.editor);
+		this.ui.requestRender();
+	}
+
+	/** Yes/No confirm built on the selector. */
+	private async showExtensionConfirm(title: string, message: string): Promise<boolean> {
+		const result = await this.showExtensionSelector(`${title}\n${message}`, ["Yes", "No"]);
+		return result === "Yes";
 	}
 
 	/**
@@ -349,6 +516,12 @@ export class InteractiveMode {
 				if (isAssistantMessage(event.message)) this.finalizeAssistantMessage(event.message);
 				break;
 			case "tool_execution_start": {
+				// Track the deploy tool so agent_end knows it ran (the tool writes the
+				// agent's purpose + SOUL.md; the human-held latch is flipped here, not there).
+				if (event.toolName === "deploy") {
+					this.deployToolCallId = event.toolCallId;
+					this.deployToolErrored = false;
+				}
 				let component = this.pendingTools.get(event.toolCallId);
 				if (!component) {
 					component = new ToolExecutionComponent(
@@ -383,11 +556,19 @@ export class InteractiveMode {
 					component.updateResult({ ...event.result, isError: event.isError });
 					this.pendingTools.delete(event.toolCallId);
 				}
+				if (event.toolCallId === this.deployToolCallId) {
+					this.deployToolErrored = event.isError;
+				}
 				break;
 			}
 			case "agent_end":
 				this.setBusy(false);
 				this.pendingTools.clear();
+				// If the deploy tool ran and succeeded this turn, confirm + deploy now
+				// that the turn has settled. Detached: finalizeDeploy awaits a UI dialog.
+				if (this.deployToolCallId && !this.deployToolErrored) {
+					void this.finalizeDeploy();
+				}
 				break;
 			default:
 				return;
@@ -410,12 +591,9 @@ export class InteractiveMode {
 	}
 
 	private appendUserMessage(text: string): void {
-		// Mirrors `@opsyhq/coding-agent`'s `UserMessageComponent` (vendored): the
-		// prompt renders as a `userMessageBg` bubble with a Markdown body in
-		// `userMessageText`, replacing steward's earlier plain `› text` line.
-		// Deviation: pi adds a *leading* Spacer(1) before the bubble (only when the
-		// chat is non-empty) and no trailing one; steward keeps its trailing Spacer(1)
-		// convention so the assistant/error/aborted paths' spacing stays consistent.
+		// The prompt renders as a `userMessageBg` bubble with a Markdown body in
+		// `userMessageText`. It keeps steward's trailing Spacer(1) convention so the
+		// assistant/error/aborted paths' spacing stays consistent.
 		this.chatContainer.addChild(new UserMessageComponent(text, this.markdownTheme));
 		this.chatContainer.addChild(new Spacer(1));
 		this.streamingComponent = undefined;

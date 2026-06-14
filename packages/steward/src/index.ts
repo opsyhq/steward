@@ -13,13 +13,15 @@ export {
 	AgentConfigSchema,
 	agentExists,
 	type CreateAgentOptions,
-	commissionAgent,
 	createAgent,
-	isCommissioned,
+	deleteAgent,
+	deployAgent,
+	isDeployed,
 	isValidAgentName,
 	listAgents,
 	loadAgentConfig,
 	saveAgentConfig,
+	setAgentPurpose,
 } from "./core/agent-config.ts";
 export {
 	type ApiKeyCredential,
@@ -59,6 +61,7 @@ export { SessionHost, type SessionHostOptions } from "./core/session-host.ts";
 export { getDefaultModel, getDefaultProvider } from "./core/settings.ts";
 export { type BuildSystemPromptOptions, buildSystemPrompt } from "./core/system-prompt.ts";
 export { type BashToolDetails, type BashToolInput, createBashTool } from "./core/tools/bash.ts";
+export { createDeployTool, type DeployToolDetails, type DeployToolInput } from "./core/tools/deploy.ts";
 export { createEditTool, type EditToolDetails, type EditToolInput } from "./core/tools/edit.ts";
 export { createFindTool, type FindToolDetails, type FindToolInput } from "./core/tools/find.ts";
 export { createGrepTool, type GrepToolDetails, type GrepToolInput } from "./core/tools/grep.ts";

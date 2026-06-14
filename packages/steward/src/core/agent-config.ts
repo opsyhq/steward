@@ -7,7 +7,8 @@
  * `readFileSync`/`writeFileSync` IO, and `create*`/`load*`/`save*`/`list*` verbs.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { type Static, Type } from "typebox";
 import { Compile } from "typebox/compile";
 import {
@@ -33,9 +34,9 @@ export const AgentConfigSchema = Type.Object({
 	 * The single human-held latch. `null` (or absent) means the agent is still in
 	 * its birth phase — it maintains its own files but may not act unattended. An
 	 * ISO timestamp grants it that right. Optional/nullable so agent.json written
-	 * before this field still validates (treated as not commissioned).
+	 * before this field still validates (treated as not deployed).
 	 */
-	commissionedAt: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+	deployedAt: Type.Optional(Type.Union([Type.String(), Type.Null()])),
 });
 
 export type AgentConfig = Static<typeof AgentConfigSchema>;
@@ -91,7 +92,8 @@ export function listAgents(): AgentConfig[] {
 
 export interface CreateAgentOptions {
 	name: string;
-	purpose: string;
+	/** Optional at birth — left empty until the agent authors its own purpose via the deploy tool. Defaults to "". */
+	purpose?: string;
 	model?: string;
 }
 
@@ -114,10 +116,10 @@ export function createAgent(options: CreateAgentOptions): AgentConfig {
 	const config: AgentConfig = {
 		schemaVersion: AGENT_SCHEMA_VERSION,
 		name,
-		purpose,
+		purpose: purpose ?? "",
 		createdAt: new Date().toISOString(),
 		...(model ? { model } : {}),
-		commissionedAt: null,
+		deployedAt: null,
 	};
 	saveAgentConfig(name, config);
 
@@ -129,16 +131,66 @@ export function createAgent(options: CreateAgentOptions): AgentConfig {
 	return config;
 }
 
-/** Whether the agent has been commissioned (granted the right to act unattended). */
-export function isCommissioned(config: AgentConfig): boolean {
-	return Boolean(config.commissionedAt);
+/** Whether the agent has been deployed (granted the right to act unattended). */
+export function isDeployed(config: AgentConfig): boolean {
+	return Boolean(config.deployedAt);
 }
 
-/** Set commissionedAt once (idempotent: returns existing config if already set). */
-export function commissionAgent(name: string): AgentConfig {
+/** Set deployedAt once (idempotent: returns existing config if already set). */
+export function deployAgent(name: string): AgentConfig {
 	const config = loadAgentConfig(name);
-	if (config.commissionedAt) return config;
-	const updated = { ...config, commissionedAt: new Date().toISOString() };
+	if (config.deployedAt) return config;
+	const updated = { ...config, deployedAt: new Date().toISOString() };
 	saveAgentConfig(name, updated);
 	return updated;
+}
+
+/** Set the agent's purpose (authored by the agent via the deploy tool) and persist. */
+export function setAgentPurpose(name: string, purpose: string): AgentConfig {
+	const config = loadAgentConfig(name);
+	const updated = { ...config, purpose };
+	saveAgentConfig(name, updated);
+	return updated;
+}
+
+/**
+ * Delete an agent's entire home dir, trying the `trash` CLI first, then falling
+ * back to a permanent recursive remove (`rmSync(..., recursive)`). Operates solely
+ * on `getAgentDir(name)` — never the shared agent credential dir.
+ */
+export function deleteAgent(name: string): { ok: boolean; method: "trash" | "unlink"; error?: string } {
+	const dir = getAgentDir(name);
+
+	// Try `trash` first (if installed)
+	const trashArgs = dir.startsWith("-") ? ["--", dir] : [dir];
+	const trashResult = spawnSync("trash", trashArgs, { encoding: "utf-8" });
+
+	const getTrashErrorHint = (): string | null => {
+		const parts: string[] = [];
+		if (trashResult.error) {
+			parts.push(trashResult.error.message);
+		}
+		const stderr = trashResult.stderr?.trim();
+		if (stderr) {
+			parts.push(stderr.split("\n")[0] ?? stderr);
+		}
+		if (parts.length === 0) return null;
+		return `trash: ${parts.join(" · ").slice(0, 200)}`;
+	};
+
+	// If trash reports success, or the dir is gone afterwards, treat it as successful
+	if (trashResult.status === 0 || !existsSync(dir)) {
+		return { ok: true, method: "trash" };
+	}
+
+	// Fallback to permanent deletion
+	try {
+		rmSync(dir, { recursive: true, force: true });
+		return { ok: true, method: "unlink" };
+	} catch (err) {
+		const unlinkError = err instanceof Error ? err.message : String(err);
+		const trashErrorHint = getTrashErrorHint();
+		const error = trashErrorHint ? `${unlinkError} (${trashErrorHint})` : unlinkError;
+		return { ok: false, method: "unlink", error };
+	}
 }

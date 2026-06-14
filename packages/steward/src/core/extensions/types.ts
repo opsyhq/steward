@@ -1,15 +1,10 @@
 /**
- * Tool-rendering types — the subset of `@opsyhq/coding-agent`'s
- * core/extensions/types.ts that the vendored file tools and the tool-execution
+ * Tool-rendering types — the subset that the file tools and the tool-execution
  * component depend on.
  *
- * pi's full file wires an entire extension system (event bus, model registry,
- * compaction, slash commands, …) and pulls in a large closure. steward has no
- * extension system, so this keeps only `ToolDefinition` and its render-context
- * types verbatim. `ExtensionContext` is reduced to the single field the tools
- * actually read (`model`, used by read.ts to note non-vision models); the rest
- * of pi's context is irrelevant here. The file lives at the same path pi uses so
- * the copied tool files import `../extensions/types.ts` unchanged.
+ * steward has no extension system, so this keeps only `ToolDefinition` and its
+ * render-context types. `ExtensionContext` is reduced to the single field the
+ * tools actually read (`model`, used by read.ts to note non-vision models).
  */
 
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -19,8 +14,8 @@ import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 
 /**
- * Context handed to a tool's `execute`. pi's version carries the full extension
- * surface; the vendored tools only read `model`, so that is all this exposes.
+ * Context handed to a tool's `execute`. The tools only read `model`, so that is
+ * all this exposes.
  */
 export interface ExtensionContext {
 	/** The active model, used by tools that tailor output to model capabilities. */

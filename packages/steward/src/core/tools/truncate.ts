@@ -1,9 +1,6 @@
 /**
  * Shared truncation utilities for tool outputs.
  *
- * Copied 1-1 from `@opsyhq/coding-agent`'s core/tools/truncate.ts (steward
- * vendors pi's file tools rather than depending on the coding-agent package).
- *
  * Truncation is based on two independent limits - whichever is hit first wins:
  * - Line limit (default: 2000 lines)
  * - Byte limit (default: 50KB)
