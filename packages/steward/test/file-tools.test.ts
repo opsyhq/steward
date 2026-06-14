@@ -38,9 +38,9 @@ function firstText(result: { content: ReadonlyArray<{ type: string; text?: strin
 	return block && block.type === "text" ? (block.text ?? "") : "";
 }
 
-// These are pi's file tools, vendored into steward and bound to the agent's home
-// dir — the same wiring SessionHost uses. We assert they reach the agent's own
-// files (SOUL.md) so a regression in cwd binding is caught.
+// The file tools are bound to the agent's home dir — the same wiring SessionHost
+// uses. We assert they reach the agent's own files (SOUL.md) so a regression in
+// cwd binding is caught.
 describe("file tools bound to the agent home", () => {
 	it("write → read round-trips SOUL.md", async () => {
 		await createWriteTool(dir).execute("c1", { path: "SOUL.md", content: "I am the scribe.\n" });

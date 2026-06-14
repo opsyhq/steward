@@ -9,8 +9,16 @@
 
 import { createInterface } from "node:readline";
 import { type Args, parseArgs, printHelp } from "./cli/args.ts";
-import { APP_NAME, VERSION } from "./config.ts";
-import { type AgentConfig, agentExists, createAgent, listAgents, loadAgentConfig } from "./core/agent-config.ts";
+import { APP_NAME, getAgentDir, VERSION } from "./config.ts";
+import {
+	type AgentConfig,
+	agentExists,
+	createAgent,
+	deleteAgent,
+	isDeployed,
+	listAgents,
+	loadAgentConfig,
+} from "./core/agent-config.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
 import { DEFAULT_MODEL, DEFAULT_THINKING_LEVEL } from "./core/defaults.ts";
 import { resolveCliModel } from "./core/model-resolver.ts";
@@ -18,6 +26,13 @@ import { SessionHost } from "./core/session-host.ts";
 import { getDefaultModel, getDefaultProvider } from "./core/settings.ts";
 import { InteractiveMode } from "./modes/interactive/interactive-mode.ts";
 import { runPrintMode } from "./modes/print-mode.ts";
+
+/**
+ * The first thing a newly created agent "says". Seeded as an assistant message into
+ * the birth session (see `InteractiveMode.seedInitialAssistantMessage`) so the agent
+ * opens by asking its human what it's for, kicking off the forming conversation.
+ */
+const BIRTH_OPENER = "What is my purpose?";
 
 export async function main(argv: string[]): Promise<number> {
 	const args = parseArgs(argv);
@@ -43,13 +58,16 @@ export async function main(argv: string[]): Promise<number> {
 
 	if (command === "new") return runNew(rest, args);
 	if (command === "list") return runList();
+	if (command === "delete") return runDelete(rest);
 	return runAgent(command, rest, args);
 }
 
 async function runNew(positionals: string[], args: Args): Promise<number> {
 	const name = positionals[0];
-	if (!name) {
-		process.stderr.write(`Usage: ${APP_NAME} new <name> [purpose]\n`);
+	// Birth is chat-only now: a name is all `new` takes. An inline purpose (extra
+	// positionals) is rejected — the agent distills its own purpose in-chat.
+	if (!name || positionals.length > 1) {
+		process.stderr.write(`Usage: ${APP_NAME} new <name>\n`);
 		return 1;
 	}
 	if (agentExists(name)) {
@@ -57,29 +75,47 @@ async function runNew(positionals: string[], args: Args): Promise<number> {
 		return 1;
 	}
 
-	let purpose = positionals.slice(1).join(" ").trim();
-	if (!purpose) {
-		console.log("agent: What is my purpose?");
-		purpose = (await readLine("you:   ")).trim();
-	}
-	if (!purpose) {
-		process.stderr.write("A purpose is required.\n");
-		return 1;
-	}
-
 	let config: AgentConfig;
 	try {
-		config = createAgent({ name, purpose, model: args.model });
+		config = createAgent({ name, model: args.model });
 	} catch (error) {
 		process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
 		return 1;
 	}
 	console.log(`Created agent "${config.name}".`);
-	console.log(`Purpose: ${config.purpose}`);
 
-	// Birth: drop straight into the interactive chat so the agent can get to know
-	// its human. (A bare inline/print path has no birth conversation to run.)
-	return runSession(name, positionals.slice(1), args);
+	// Birth happens inside the chat: drop straight into the interactive TUI, seeding
+	// the agent's opener so it opens by asking its human and forms itself before deploying.
+	return runSession(name, [], args, { initialAssistantMessage: BIRTH_OPENER });
+}
+
+async function runDelete(positionals: string[]): Promise<number> {
+	const name = positionals[0];
+	if (!name || positionals.length > 1) {
+		process.stderr.write(`Usage: ${APP_NAME} delete <name>\n`);
+		return 1;
+	}
+	if (!agentExists(name)) {
+		process.stderr.write(`Unknown agent "${name}".\n`);
+		return 1;
+	}
+
+	console.log(`This will delete agent "${name}" and all of its memory, sessions, and workspace:`);
+	console.log(`  ${getAgentDir(name)}`);
+	console.log(`Type ${name} to confirm:`);
+	const answer = (await readLine("")).trim();
+	if (answer !== name) {
+		console.log("Delete cancelled.");
+		return 1;
+	}
+
+	const result = deleteAgent(name);
+	if (!result.ok) {
+		process.stderr.write(`Failed to delete agent "${name}": ${result.error ?? "unknown error"}\n`);
+		return 1;
+	}
+	console.log(`Deleted agent "${name}".`);
+	return 0;
 }
 
 function runList(): number {
@@ -107,9 +143,14 @@ async function runAgent(name: string, positionals: string[], args: Args): Promis
 /**
  * Resolve model/auth once, then run the agent — single-shot for inline/`--print`,
  * otherwise the interactive chat. Session construction (env, prompt, tools) and
- * in-place swaps (e.g. after commissioning) are owned by the `SessionHost`.
+ * in-place swaps (e.g. after deploy) are owned by the `SessionHost`.
  */
-async function runSession(name: string, positionals: string[], args: Args): Promise<number> {
+async function runSession(
+	name: string,
+	positionals: string[],
+	args: Args,
+	options: { initialAssistantMessage?: string } = {},
+): Promise<number> {
 	const initialConfig = loadAgentConfig(name);
 
 	// Model precedence: --model flag → agent.json → shared pi default → built-in.
@@ -142,22 +183,27 @@ async function runSession(name: string, positionals: string[], args: Args): Prom
 
 	const host = new SessionHost({ name, model, thinkingLevel, authStorage });
 
+	// A forming agent stays in its single birth session, so the seeded "What is my
+	// purpose?" and the whole forming conversation are always resumed; `--new` only
+	// takes effect once deployed.
+	const fresh = isDeployed(initialConfig) ? Boolean(args.new) : false;
+
 	// `--print` (or a bare inline message) is single-shot; `--print` needs a message.
 	if (args.print || message) {
 		if (args.print && !message) {
 			process.stderr.write(`Print mode needs a message: ${APP_NAME} ${name} --print "<message>"\n`);
 			return 1;
 		}
-		await host.start({ fresh: args.new });
+		await host.start({ fresh });
 		const code = await runPrintMode(host.harness, { message });
 		await host.cleanup();
 		return code;
 	}
 
 	// Interactive: one long-lived TUI. The host swaps the session in place on
-	// commission (see InteractiveMode.handleCommissionCommand), so there is no loop here.
-	await host.start({ fresh: args.new });
-	await new InteractiveMode(host).run();
+	// deploy (see InteractiveMode.doDeploy), so there is no loop here.
+	await host.start({ fresh });
+	await new InteractiveMode(host, { initialAssistantMessage: options.initialAssistantMessage }).run();
 	await host.cleanup();
 	return 0;
 }

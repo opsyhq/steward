@@ -8,10 +8,8 @@ import {
 } from "@opsyhq/tui";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
-// Deviation from `@opsyhq/coding-agent`: pi calls `getAgentDir()` (no-arg, the
-// shared agent dir). Steward's config.ts repurposed `getAgentDir(name)` for
-// per-agent dirs and exposes the shared dir as `getSharedAgentDir()`, so this
-// vendored copy uses that name for the same value pi's `getAgentDir()` returns.
+// config.ts uses `getAgentDir(name)` for per-agent dirs and exposes the shared
+// agent dir as `getSharedAgentDir()`, which is the value used here.
 import { getSharedAgentDir } from "../config.ts";
 
 export interface AppKeybindings {

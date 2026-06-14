@@ -2,15 +2,17 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { getAgentConfigPath, getSoulPath } from "../src/config.ts";
+import { getAgentConfigPath, getAgentDir, getSoulPath } from "../src/config.ts";
 import {
 	agentExists,
-	commissionAgent,
 	createAgent,
-	isCommissioned,
+	deleteAgent,
+	deployAgent,
+	isDeployed,
 	isValidAgentName,
 	listAgents,
 	loadAgentConfig,
+	setAgentPurpose,
 } from "../src/core/agent-config.ts";
 
 let home: string;
@@ -52,6 +54,12 @@ describe("agent-config round-trip", () => {
 		expect(loaded).toEqual(created);
 	});
 
+	it("defaults purpose to an empty string when omitted (the agent distills it in-chat)", () => {
+		const created = createAgent({ name: "scribe" });
+		expect(created.purpose).toBe("");
+		expect(loadAgentConfig("scribe").purpose).toBe("");
+	});
+
 	it("persists an optional model", () => {
 		createAgent({ name: "scribe", purpose: "x", model: "anthropic/claude-opus-4-8" });
 		expect(loadAgentConfig("scribe").model).toBe("anthropic/claude-opus-4-8");
@@ -77,37 +85,58 @@ describe("agent-config round-trip", () => {
 	});
 });
 
-describe("commissioning", () => {
-	it("creates an agent uncommissioned with a SOUL.md", () => {
+describe("deploy", () => {
+	it("creates an agent undeployed with a SOUL.md", () => {
 		const created = createAgent({ name: "calories", purpose: "track meals" });
-		expect(created.commissionedAt).toBeNull();
-		expect(isCommissioned(created)).toBe(false);
+		expect(created.deployedAt).toBeNull();
+		expect(isDeployed(created)).toBe(false);
 		expect(existsSync(getSoulPath("calories"))).toBe(true);
 	});
 
-	it("commissionAgent stamps an ISO timestamp", () => {
+	it("deployAgent stamps an ISO timestamp", () => {
 		createAgent({ name: "calories", purpose: "track meals" });
-		const updated = commissionAgent("calories");
-		expect(updated.commissionedAt).toBeTruthy();
-		expect(new Date(updated.commissionedAt as string).toISOString()).toBe(updated.commissionedAt);
-		expect(isCommissioned(updated)).toBe(true);
-		expect(isCommissioned(loadAgentConfig("calories"))).toBe(true);
+		const updated = deployAgent("calories");
+		expect(updated.deployedAt).toBeTruthy();
+		expect(new Date(updated.deployedAt as string).toISOString()).toBe(updated.deployedAt);
+		expect(isDeployed(updated)).toBe(true);
+		expect(isDeployed(loadAgentConfig("calories"))).toBe(true);
 	});
 
 	it("is idempotent — a second call leaves the timestamp unchanged", () => {
 		createAgent({ name: "calories", purpose: "track meals" });
-		const first = commissionAgent("calories");
-		const second = commissionAgent("calories");
-		expect(second.commissionedAt).toBe(first.commissionedAt);
+		const first = deployAgent("calories");
+		const second = deployAgent("calories");
+		expect(second.deployedAt).toBe(first.deployedAt);
 	});
 
-	it("loads agent.json written before commissionedAt existed (back-compat)", () => {
+	it("loads agent.json written before deployedAt existed (treated as not deployed)", () => {
 		createAgent({ name: "legacy", purpose: "old agent" });
-		// Simulate a pre-feature config: no commissionedAt key at all.
+		// Simulate a pre-feature config: no deployedAt key at all.
 		const legacy = { schemaVersion: 1, name: "legacy", purpose: "old agent", createdAt: new Date().toISOString() };
 		writeFileSync(getAgentConfigPath("legacy"), `${JSON.stringify(legacy, null, 2)}\n`, "utf-8");
 		const loaded = loadAgentConfig("legacy");
-		expect(loaded.commissionedAt).toBeUndefined();
-		expect(isCommissioned(loaded)).toBe(false);
+		expect(loaded.deployedAt).toBeUndefined();
+		expect(isDeployed(loaded)).toBe(false);
+	});
+});
+
+describe("setAgentPurpose", () => {
+	it("overwrites and persists the purpose", () => {
+		createAgent({ name: "scribe" });
+		const updated = setAgentPurpose("scribe", "keep the meeting minutes");
+		expect(updated.purpose).toBe("keep the meeting minutes");
+		expect(loadAgentConfig("scribe").purpose).toBe("keep the meeting minutes");
+	});
+});
+
+describe("deleteAgent", () => {
+	it("removes the agent's home dir", () => {
+		createAgent({ name: "scratch", purpose: "temp" });
+		expect(existsSync(getAgentDir("scratch"))).toBe(true);
+
+		const result = deleteAgent("scratch");
+		expect(result.ok).toBe(true);
+		expect(existsSync(getAgentDir("scratch"))).toBe(false);
+		expect(agentExists("scratch")).toBe(false);
 	});
 });

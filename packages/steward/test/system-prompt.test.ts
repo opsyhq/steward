@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { commissionAgent, createAgent, loadAgentConfig } from "../src/core/agent-config.ts";
+import { createAgent, deployAgent, loadAgentConfig } from "../src/core/agent-config.ts";
 import { loadMemory } from "../src/core/memory.ts";
 import { buildSystemPrompt } from "../src/core/system-prompt.ts";
 import { createMemoryTool } from "../src/core/tools/memory.ts";
@@ -53,18 +53,19 @@ describe("buildSystemPrompt", () => {
 	});
 });
 
-describe("birth instruction (commissioning)", () => {
-	it("appends the birth instruction when not yet commissioned", () => {
+describe("birth instruction (deploy)", () => {
+	it("appends the birth instruction when not yet deployed", () => {
 		const prompt = buildSystemPrompt({ config: loadAgentConfig("scribe") });
-		expect(prompt).toContain("not yet commissioned");
-		expect(prompt).toContain("/commission");
+		expect(prompt).toContain("not yet deployed");
+		expect(prompt).toContain("`deploy` tool");
+		expect(prompt).toContain("/deploy");
 	});
 
-	it("omits the birth instruction once commissioned", () => {
-		commissionAgent("scribe");
+	it("omits the birth instruction once deployed", () => {
+		deployAgent("scribe");
 		const prompt = buildSystemPrompt({ config: loadAgentConfig("scribe") });
-		expect(prompt).not.toContain("not yet commissioned");
-		expect(prompt).toContain("commissioned: you may now act");
+		expect(prompt).not.toContain("not yet deployed");
+		expect(prompt).toContain("deployed: you may now act");
 	});
 });
 

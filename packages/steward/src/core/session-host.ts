@@ -8,22 +8,22 @@
  * interactive mode holds a `SessionHost` and calls `newSession()` to swap in
  * place — required because the system prompt is frozen for a session's lifetime,
  * so a transition that must change the prompt (the birth instruction dropping at
- * commission) needs a new harness.
+ * deploy) needs a new harness.
  */
 
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import type { AgentHarness, ThinkingLevel } from "@opsyhq/agent";
 import type { NodeExecutionEnv } from "@opsyhq/agent/node";
 import { getAgentDir } from "../config.ts";
-import { type AgentConfig, loadAgentConfig } from "./agent-config.ts";
+import { type AgentConfig, isDeployed, loadAgentConfig } from "./agent-config.ts";
 import type { AuthStorage } from "./auth-storage.ts";
 import { loadMemory } from "./memory.ts";
 import { createAgentSession } from "./sdk.ts";
 import { openAgentSession } from "./session.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
-// pi's tools, vendored under tools/ (copied 1-1, see those files). memory is
-// steward's own curated-notes tool. The rest — read/write/edit/ls/grep/find and
-// bash — are wired exactly as pi wires them, with no overrides.
+import { createDeployTool } from "./tools/deploy.ts";
+// File tools live under tools/. memory is steward's own curated-notes tool; the
+// rest — read/write/edit/ls/grep/find and bash — are wired with no overrides.
 import {
 	createBashTool,
 	createEditTool,
@@ -79,16 +79,47 @@ export class SessionHost {
 		return this.build(options.fresh ?? false);
 	}
 
-	/** Tear down the current session and build a fresh one (e.g. after commissioning). */
+	/** Tear down the current session and build a fresh one (e.g. after deploy). */
 	async newSession(): Promise<AgentHarness> {
 		return this.build(true);
+	}
+
+	/**
+	 * Persist a minimal assistant message into the current session (e.g. the
+	 * seeded "What is my purpose?" that opens a forming agent's first chat) and
+	 * return it so the caller can also render it. The field shape is copied from
+	 * `createFailureMessage` (agent-harness.ts:49): api/provider/model from the
+	 * configured model, zeroed `usage`, a "stop" stopReason, and a single text
+	 * content block.
+	 */
+	async seedAssistantMessage(text: string): Promise<AssistantMessage> {
+		const { model } = this.options;
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			timestamp: Date.now(),
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		};
+		await this.harness.appendMessage(message);
+		return message;
 	}
 
 	private async build(fresh: boolean): Promise<AgentHarness> {
 		const { name, model, thinkingLevel, authStorage } = this.options;
 		const previousEnv = this.env;
 
-		// Re-read: commissionedAt may have changed since the previous harness.
+		// Re-read: deployedAt may have changed since the previous harness.
 		const config = loadAgentConfig(name);
 		const { session, env } = await openAgentSession(name, { fresh });
 
@@ -111,6 +142,10 @@ export class SessionHost {
 			thinkingLevel,
 			tools: [
 				createMemoryTool(name),
+				// The deploy tool only exists while forming — the agent uses it to
+				// author its purpose + SOUL.md and ask to be deployed. Once deployed it
+				// has served its purpose and is omitted.
+				...(isDeployed(config) ? [] : [createDeployTool(name)]),
 				createReadTool(agentDir),
 				createWriteTool(agentDir),
 				createEditTool(agentDir),
