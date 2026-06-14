@@ -26,6 +26,7 @@ import {
 	Text,
 	TUI,
 } from "@opsyhq/tui";
+import { commissionAgent } from "../../core/agent-config.ts";
 import { collectText, isFailureMessage } from "../message.ts";
 import { getEditorTheme, getMarkdownTheme, style } from "./theme.ts";
 
@@ -37,6 +38,13 @@ export interface InteractiveModeOptions {
 	name: string;
 	/** Agent purpose, shown under the name when present. */
 	purpose?: string;
+	/** Whether the agent is already commissioned (gates the /commission command + birth hint). */
+	commissioned?: boolean;
+}
+
+/** What `run()` resolves with: `restart` requests a fresh session (e.g. after commissioning). */
+export interface InteractiveModeResult {
+	restart: boolean;
 }
 
 function isAssistantMessage(message: AgentMessage): message is AssistantMessage {
@@ -56,11 +64,12 @@ export class InteractiveMode {
 
 	private unsubscribe?: () => void;
 	private removeInputListener?: () => void;
-	private resolveExit?: () => void;
+	private resolveExit?: (result: InteractiveModeResult) => void;
 	private busy = false;
 	private streamingMarkdown?: Markdown;
 	private lastSigintTime = 0;
 	private stopped = false;
+	private restart = false;
 
 	constructor(host: AgentHarness, options: InteractiveModeOptions) {
 		this.host = host;
@@ -76,7 +85,7 @@ export class InteractiveMode {
 		this.loader.stop();
 	}
 
-	run(): Promise<void> {
+	run(): Promise<InteractiveModeResult> {
 		this.editor.onSubmit = (text) => {
 			void this.handleSubmit(text);
 		};
@@ -95,7 +104,7 @@ export class InteractiveMode {
 		this.ui.setFocus(this.editor);
 		this.ui.start();
 
-		return new Promise<void>((resolve) => {
+		return new Promise<InteractiveModeResult>((resolve) => {
 			this.resolveExit = resolve;
 		});
 	}
@@ -107,15 +116,18 @@ export class InteractiveMode {
 		this.unsubscribe?.();
 		this.removeInputListener?.();
 		this.ui.stop();
-		this.resolveExit?.();
+		this.resolveExit?.({ restart: this.restart });
 	}
 
 	private appendHeader(): void {
-		const { name, purpose } = this.options;
+		const { name, purpose, commissioned } = this.options;
 		const lines = [style.bold(name)];
 		const trimmedPurpose = purpose?.trim();
 		if (trimmedPurpose) {
 			lines.push(style.dim(trimmedPurpose));
+		}
+		if (!commissioned) {
+			lines.push(style.dim("Forming — it will ask to be commissioned; type /commission to finalize manually."));
 		}
 		lines.push(style.dim("Ctrl+C to exit."));
 		this.chatContainer.addChild(new Text(lines.join("\n"), 1, 0));
@@ -125,6 +137,23 @@ export class InteractiveMode {
 	private async handleSubmit(text: string): Promise<void> {
 		const trimmed = text.trim();
 		if (trimmed.length === 0 || this.busy) return;
+
+		// Slash commands are intercepted before reaching the model.
+		if (trimmed === "/commission" || trimmed === "/finalize") {
+			this.editor.setText("");
+			if (this.options.commissioned) {
+				this.appendErrorLine("Already commissioned.");
+				this.ui.requestRender();
+				return;
+			}
+			commissionAgent(this.options.name);
+			this.appendToolLine("✓ Commissioned — starting a fresh session.");
+			this.ui.requestRender();
+			this.restart = true;
+			this.stop(); // resolves run() with { restart: true }
+			return;
+		}
+
 		this.editor.setText("");
 		this.statusContainer.clear();
 		this.appendUserMessage(trimmed);

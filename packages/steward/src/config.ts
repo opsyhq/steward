@@ -93,6 +93,11 @@ export function getAgentConfigPath(name: string): string {
 	return join(getAgentDir(name), "agent.json");
 }
 
+/** Path to an agent's curated SOUL.md (who it is / what it's for). */
+export function getSoulPath(name: string): string {
+	return join(getAgentDir(name), "SOUL.md");
+}
+
 /** Path to an agent's curated MEMORY.md */
 export function getMemoryPath(name: string): string {
 	return join(getAgentDir(name), "MEMORY.md");

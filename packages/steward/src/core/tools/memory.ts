@@ -1,8 +1,10 @@
 /**
- * The `memory` tool — durable edits to the agent's curated MEMORY.md / USER.md.
+ * The `self_update` tool — durable edits to the agent's own curated files:
+ * SOUL.md (who it is / what it's for), USER.md (facts about its human), and
+ * MEMORY.md (durable working notes).
  *
  * Mirrors coding-agent's tool-factory convention (`createReadTool` →
- * `createMemoryTool`): one factory bound to a cwd/agent, returning an
+ * `createSelfUpdateTool`): one factory bound to a cwd/agent, returning an
  * `AgentTool`. Operations (add/replace/remove) are modeled on hermes' memory
  * tool. Writes are durable immediately but only enter the system prompt on the
  * NEXT session (frozen-snapshot rule), so results say "effective next session".
@@ -13,12 +15,15 @@
 
 import type { AgentTool, AgentToolResult } from "@opsyhq/agent";
 import { type Static, Type } from "typebox";
-import { getMemoryPath, getUserMemoryPath } from "../../config.ts";
-import { MEMORY_BUDGET, readMemoryFile, USER_BUDGET, writeMemoryFile } from "../memory.ts";
+import { getMemoryPath, getSoulPath, getUserMemoryPath } from "../../config.ts";
+import { MEMORY_BUDGET, readMemoryFile, SOUL_BUDGET, USER_BUDGET, writeMemoryFile } from "../memory.ts";
+
+type SelfFile = "SOUL" | "USER" | "MEMORY";
 
 const memorySchema = Type.Object({
-	file: Type.Union([Type.Literal("MEMORY"), Type.Literal("USER")], {
-		description: "Which curated file to edit: MEMORY (your own notebook) or USER (facts about the user).",
+	file: Type.Union([Type.Literal("SOUL"), Type.Literal("USER"), Type.Literal("MEMORY")], {
+		description:
+			"Which curated file to edit: SOUL (who you are / what you're for), USER (facts about your human), or MEMORY (durable working notes).",
 	}),
 	op: Type.Union([Type.Literal("add"), Type.Literal("replace"), Type.Literal("remove")], {
 		description:
@@ -37,7 +42,7 @@ const memorySchema = Type.Object({
 export type MemoryToolInput = Static<typeof memorySchema>;
 
 export interface MemoryToolDetails {
-	file: "MEMORY" | "USER";
+	file: SelfFile;
 	op: "add" | "replace" | "remove";
 	applied: boolean;
 	bytes?: number;
@@ -90,18 +95,31 @@ function textResult(text: string, details: MemoryToolDetails): AgentToolResult<M
 	return { content: [{ type: "text", text }], details };
 }
 
-export function createMemoryTool(name: string): AgentTool<typeof memorySchema, MemoryToolDetails> {
+function pathFor(name: string, file: SelfFile): string {
+	if (file === "SOUL") return getSoulPath(name);
+	if (file === "USER") return getUserMemoryPath(name);
+	return getMemoryPath(name);
+}
+
+function budgetFor(file: SelfFile): number {
+	if (file === "SOUL") return SOUL_BUDGET;
+	if (file === "USER") return USER_BUDGET;
+	return MEMORY_BUDGET;
+}
+
+export function createSelfUpdateTool(name: string): AgentTool<typeof memorySchema, MemoryToolDetails> {
 	return {
-		name: "memory",
-		label: "Memory",
+		name: "self_update",
+		label: "Self",
 		description:
-			"Edit your curated memory. MEMORY.md is your own durable notebook; USER.md holds facts about the user. " +
+			"Edit your own curated files. SOUL.md is who you are and what you're for (a whole-file write is natural — " +
+			"use replace with no `match`); USER.md holds facts about your human; MEMORY.md is your durable working notebook. " +
 			"Edits are saved immediately but only appear in your prompt on your next session. Keep entries concise.",
 		parameters: memorySchema,
 		executionMode: "sequential",
 		execute: async (_toolCallId, params) => {
-			const path = params.file === "MEMORY" ? getMemoryPath(name) : getUserMemoryPath(name);
-			const budget = params.file === "MEMORY" ? MEMORY_BUDGET : USER_BUDGET;
+			const path = pathFor(name, params.file);
+			const budget = budgetFor(params.file);
 			const current = readMemoryFile(path);
 
 			const outcome = applyMemoryOp(params.file, current, params);
