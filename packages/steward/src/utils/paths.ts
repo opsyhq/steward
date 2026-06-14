@@ -8,7 +8,7 @@
  */
 
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve as nodeResolvePath } from "node:path";
+import { isAbsolute, join, resolve as nodeResolvePath, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
@@ -54,4 +54,20 @@ export function resolvePath(input: string, baseDir: string = process.cwd(), opti
 	const normalized = normalizePath(input, options);
 	const normalizedBaseDir = normalizePath(baseDir);
 	return isAbsolute(normalized) ? nodeResolvePath(normalized) : nodeResolvePath(normalizedBaseDir, normalized);
+}
+
+export function getCwdRelativePath(filePath: string, cwd: string): string | undefined {
+	const resolvedCwd = resolvePath(cwd);
+	const resolvedPath = resolvePath(filePath, resolvedCwd);
+	const relativePath = relative(resolvedCwd, resolvedPath);
+	const isInsideCwd =
+		relativePath === "" ||
+		(relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath));
+
+	return isInsideCwd ? relativePath || "." : undefined;
+}
+
+export function formatPathRelativeToCwdOrAbsolute(filePath: string, cwd: string): string {
+	const absolutePath = resolvePath(filePath, cwd);
+	return (getCwdRelativePath(absolutePath, cwd) ?? absolutePath).split(sep).join("/");
 }

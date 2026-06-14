@@ -1,18 +1,16 @@
-/**
- * The `find` tool — copied from `@opsyhq/coding-agent`'s core/tools/find.ts.
- *
- * Deviations: the TUI renderCall/renderResult are dropped (plain AgentTool), and
- * `ensureTool` resolves fd from PATH rather than auto-downloading it (see
- * tools-manager.ts). The fd invocation and output handling are 1-1.
- */
-
-import { spawn } from "node:child_process";
-import path from "node:path";
 import { createInterface } from "node:readline";
-import type { AgentTool, AgentToolResult } from "@opsyhq/agent";
+import type { AgentTool } from "@opsyhq/agent";
+import { Text } from "@opsyhq/tui";
+import { spawn } from "child_process";
+import path from "path";
 import { type Static, Type } from "typebox";
+import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
+import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import { ensureTool } from "../../utils/tools-manager.ts";
+import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
-import { ensureTool } from "./tools-manager.ts";
+import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
+import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
 
 function toPosixPath(value: string): string {
@@ -58,21 +56,74 @@ export interface FindToolOptions {
 	operations?: FindOperations;
 }
 
-export function createFindTool(
+function formatFindCall(args: { pattern: string; path?: string; limit?: number } | undefined, theme: Theme): string {
+	const pattern = str(args?.pattern);
+	const rawPath = str(args?.path);
+	const path = rawPath !== null ? shortenPath(rawPath || ".") : null;
+	const limit = args?.limit;
+	const invalidArg = invalidArgText(theme);
+	let text =
+		theme.fg("toolTitle", theme.bold("find")) +
+		" " +
+		(pattern === null ? invalidArg : theme.fg("accent", pattern || "")) +
+		theme.fg("toolOutput", ` in ${path === null ? invalidArg : path}`);
+	if (limit !== undefined) {
+		text += theme.fg("toolOutput", ` (limit ${limit})`);
+	}
+	return text;
+}
+
+function formatFindResult(
+	result: {
+		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+		details?: FindToolDetails;
+	},
+	options: ToolRenderResultOptions,
+	theme: Theme,
+	showImages: boolean,
+): string {
+	const output = getTextOutput(result, showImages).trim();
+	let text = "";
+	if (output) {
+		const lines = output.split("\n");
+		const maxLines = options.expanded ? lines.length : 20;
+		const displayLines = lines.slice(0, maxLines);
+		const remaining = lines.length - maxLines;
+		text += `\n${displayLines.map((line) => theme.fg("toolOutput", line)).join("\n")}`;
+		if (remaining > 0) {
+			text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+		}
+	}
+
+	const resultLimit = result.details?.resultLimitReached;
+	const truncation = result.details?.truncation;
+	if (resultLimit || truncation?.truncated) {
+		const warnings: string[] = [];
+		if (resultLimit) warnings.push(`${resultLimit} results limit`);
+		if (truncation?.truncated) warnings.push(`${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit`);
+		text += `\n${theme.fg("warning", `[Truncated: ${warnings.join(", ")}]`)}`;
+	}
+	return text;
+}
+
+export function createFindToolDefinition(
 	cwd: string,
 	options?: FindToolOptions,
-): AgentTool<typeof findSchema, FindToolDetails | undefined> {
+): ToolDefinition<typeof findSchema, FindToolDetails | undefined> {
 	const customOps = options?.operations;
 	return {
 		name: "find",
 		label: "find",
 		description: `Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} results or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first).`,
+		promptSnippet: "Find files by glob pattern (respects .gitignore)",
 		parameters: findSchema,
 		async execute(
 			_toolCallId,
-			{ pattern, path: searchDir, limit },
-			signal,
-		): Promise<AgentToolResult<FindToolDetails | undefined>> {
+			{ pattern, path: searchDir, limit }: { pattern: string; path?: string; limit?: number },
+			signal?: AbortSignal,
+			_onUpdate?,
+			_ctx?,
+		) {
 			return new Promise((resolve, reject) => {
 				if (signal?.aborted) {
 					reject(new Error("Operation aborted"));
@@ -268,7 +319,9 @@ export function createFindTool(
 							const details: FindToolDetails = {};
 							const notices: string[] = [];
 							if (resultLimitReached) {
-								notices.push(`${effectiveLimit} results limit reached`);
+								notices.push(
+									`${effectiveLimit} results limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
+								);
 								details.resultLimitReached = effectiveLimit;
 							}
 							if (truncation.truncated) {
@@ -285,11 +338,30 @@ export function createFindTool(
 								}),
 							);
 						});
-					} catch (err) {
-						settle(() => reject(err as Error));
+					} catch (e) {
+						if (signal?.aborted) {
+							settle(() => reject(new Error("Operation aborted")));
+							return;
+						}
+						const error = e instanceof Error ? e : new Error(String(e));
+						settle(() => reject(error));
 					}
 				})();
 			});
 		},
+		renderCall(args, theme, context) {
+			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+			text.setText(formatFindCall(args, theme));
+			return text;
+		},
+		renderResult(result, options, theme, context) {
+			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+			text.setText(formatFindResult(result as any, options, theme, context.showImages));
+			return text;
+		},
 	};
+}
+
+export function createFindTool(cwd: string, options?: FindToolOptions): AgentTool<typeof findSchema> {
+	return wrapToolDefinition(createFindToolDefinition(cwd, options));
 }

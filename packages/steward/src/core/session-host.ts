@@ -21,16 +21,19 @@ import { loadMemory } from "./memory.ts";
 import { createAgentSession } from "./sdk.ts";
 import { openAgentSession } from "./session.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
-// pi's tools, vendored under tools/ (copied 1-1, see those files); bash is the
-// engine-backed deviation. memory is steward's own curated-notes tool.
-import { createBashTool } from "./tools/bash.ts";
-import { createEditTool } from "./tools/edit.ts";
-import { createFindTool } from "./tools/find.ts";
-import { createGrepTool } from "./tools/grep.ts";
-import { createLsTool } from "./tools/ls.ts";
+// pi's tools, vendored under tools/ (copied 1-1, see those files). memory is
+// steward's own curated-notes tool. The rest — read/write/edit/ls/grep/find and
+// bash — are wired exactly as pi wires them, with no overrides.
+import {
+	createBashTool,
+	createEditTool,
+	createFindTool,
+	createGrepTool,
+	createLsTool,
+	createReadTool,
+	createWriteTool,
+} from "./tools/index.ts";
 import { createMemoryTool } from "./tools/memory.ts";
-import { createReadTool } from "./tools/read.ts";
-import { createWriteTool } from "./tools/write.ts";
 
 export interface SessionHostOptions {
 	name: string;
@@ -61,6 +64,16 @@ export class SessionHost {
 		return this._config;
 	}
 
+	/**
+	 * The dir tools operate in — the agent's home dir, where SOUL/MEMORY/USER.md
+	 * and workspace/ live. Mirrors `@opsyhq/coding-agent`'s `SessionManager.getCwd()`,
+	 * which the interactive mode passes into each `ToolExecutionComponent` so its
+	 * built-in renderers can reconstruct from cwd.
+	 */
+	getCwd(): string {
+		return getAgentDir(this.options.name);
+	}
+
 	/** Build the first session. */
 	async start(options: { fresh?: boolean } = {}): Promise<AgentHarness> {
 		return this.build(options.fresh ?? false);
@@ -86,7 +99,9 @@ export class SessionHost {
 
 		// Tools operate in the agent's home dir, where SOUL/MEMORY/USER.md and the
 		// workspace/ subdir live. memory is steward's curated-notes tool; the rest
-		// are pi's read/write/edit/ls/grep/find plus the engine-backed bash.
+		// are pi's read/write/edit/ls/grep/find plus bash, wired exactly as pi wires
+		// them — bash uses pi's default local shell operations (it streams output
+		// itself via the renderer's onUpdate), so there are no overrides.
 		const agentDir = getAgentDir(name);
 		const { harness } = await createAgentSession({
 			env,
@@ -102,7 +117,7 @@ export class SessionHost {
 				createLsTool(agentDir),
 				createGrepTool(agentDir),
 				createFindTool(agentDir),
-				createBashTool(env, agentDir),
+				createBashTool(agentDir),
 			],
 			authStorage,
 		});

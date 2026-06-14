@@ -68,5 +68,11 @@ export { createReadTool, type ReadToolDetails, type ReadToolInput } from "./core
 export { createWriteTool, type WriteToolInput } from "./core/tools/write.ts";
 export { main } from "./main.ts";
 export { InteractiveMode } from "./modes/interactive/interactive-mode.ts";
-export { getEditorTheme, getMarkdownTheme, getSelectListTheme, style } from "./modes/interactive/theme.ts";
+export {
+	getEditorTheme,
+	getMarkdownTheme,
+	getSelectListTheme,
+	initTheme,
+	theme,
+} from "./modes/interactive/theme/theme.ts";
 export { runPrintMode } from "./modes/print-mode.ts";
