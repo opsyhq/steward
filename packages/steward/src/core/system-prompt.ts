@@ -3,7 +3,7 @@
  *
  * Same file/name/signature as coding-agent's core/system-prompt.ts
  * (`buildSystemPrompt(options): string` + `BuildSystemPromptOptions`). Steward's
- * prompt is built from the agent's identity (name + purpose) plus a frozen
+ * prompt is built from the agent's name/purpose plus a frozen
  * snapshot of curated memory (read once at session start — see core/memory.ts).
  */
 
@@ -11,6 +11,8 @@ import type { AgentConfig } from "./agent-config.ts";
 
 export interface BuildSystemPromptOptions {
 	config: AgentConfig;
+	/** Frozen SOUL.md snapshot. Empty string when absent. */
+	soul?: string;
 	/** Frozen MEMORY.md snapshot. Empty string when absent. */
 	memory?: string;
 	/** Frozen USER.md snapshot. Empty string when absent. */
@@ -28,16 +30,26 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	const parts = [`You are ${config.name}, a persistent, purposeful agent.`, "", "Your purpose:", purpose];
 
+	const soul = options.soul ?? "";
 	const memory = options.memory ?? "";
 	const user = options.user ?? "";
-	if (memory.length > 0 || user.length > 0) {
+	parts.push(
+		"",
+		"## Your self-maintained files (read-only this session; edit via the self_update tool, effective next session)",
+		"",
+		section("SOUL.md", soul),
+		"",
+		section("MEMORY.md", memory),
+		"",
+		section("USER.md", user),
+	);
+
+	if (!config.commissionedAt) {
 		parts.push(
 			"",
-			"## Your memory (read-only this session; edit via the memory tool, effective next session)",
+			"## Birth instruction",
 			"",
-			section("MEMORY.md", memory),
-			"",
-			section("USER.md", user),
+			"You are newly created and not yet commissioned — you may not act unattended yet. Your first job is to understand your purpose and your human: interview them conversationally, one useful question at a time, and record what you learn with the self_update tool (SOUL = who you are and what you're for; USER = facts about your human; MEMORY = durable notes). When you understand your purpose and your human well enough to begin, propose commissioning: summarize who you'll be and ask them to confirm by typing /commission (or /finalize). Do not start doing the job yet — first become yourself.",
 		);
 	}
 

@@ -74,7 +74,7 @@ export function printHelp(): void {
 	console.log(`${APP_NAME} — persistent, purposeful agents
 
 Usage:
-  ${APP_NAME} new <name> [purpose] [--model provider/id]   Create a new agent
+  ${APP_NAME} new <name> [purpose] [--model provider/id]   Create a new agent and start its first conversation
   ${APP_NAME} list                                         List agents
   ${APP_NAME} <name> [message] [--new] [--print]           Talk to an agent
 

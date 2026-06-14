@@ -10,16 +10,23 @@
 import { createInterface } from "node:readline";
 import { type Args, parseArgs, printHelp } from "./cli/args.ts";
 import { APP_NAME, VERSION } from "./config.ts";
-import { agentExists, createAgent, listAgents, loadAgentConfig } from "./core/agent-config.ts";
+import {
+	type AgentConfig,
+	agentExists,
+	createAgent,
+	isCommissioned,
+	listAgents,
+	loadAgentConfig,
+} from "./core/agent-config.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
 import { DEFAULT_MODEL, DEFAULT_THINKING_LEVEL } from "./core/defaults.ts";
 import { loadMemory } from "./core/memory.ts";
 import { resolveCliModel } from "./core/model-resolver.ts";
-import { createAgentSession } from "./core/sdk.ts";
+import { createAgentSession, type CreateAgentSessionOptions, type CreateAgentSessionResult } from "./core/sdk.ts";
 import { openAgentSession } from "./core/session.ts";
 import { getDefaultModel, getDefaultProvider } from "./core/settings.ts";
 import { buildSystemPrompt } from "./core/system-prompt.ts";
-import { createMemoryTool } from "./core/tools/memory.ts";
+import { createSelfUpdateTool } from "./core/tools/memory.ts";
 import { InteractiveMode } from "./modes/interactive/interactive-mode.ts";
 import { runPrintMode } from "./modes/print-mode.ts";
 
@@ -75,7 +82,7 @@ async function runNew(positionals: string[], args: Args): Promise<number> {
 		const config = createAgent({ name, purpose, model: args.model });
 		console.log(`Created agent "${config.name}".`);
 		console.log(`Purpose: ${config.purpose}`);
-		return 0;
+		return runSession(config.name, [], args);
 	} catch (error) {
 		process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
 		return 1;
@@ -102,6 +109,10 @@ async function runAgent(name: string, positionals: string[], args: Args): Promis
 		return 1;
 	}
 
+	return runSession(name, positionals, args);
+}
+
+async function runSession(name: string, positionals: string[], args: Args): Promise<number> {
 	const config = loadAgentConfig(name);
 
 	// Model precedence: --model flag → agent.json → shared pi default → built-in.
@@ -130,24 +141,6 @@ async function runAgent(name: string, positionals: string[], args: Args): Promis
 	}
 
 	const thinkingLevel = args.thinking ?? resolved.thinkingLevel ?? DEFAULT_THINKING_LEVEL;
-
-	const { session, env } = await openAgentSession(name, { fresh: args.new });
-
-	// Read curated memory ONCE and freeze it into the prompt. Mid-session edits
-	// via the memory tool persist to disk but only enter the prompt next session.
-	const { memory, user } = loadMemory(name);
-	const systemPrompt = buildSystemPrompt({ config, memory, user });
-
-	const { harness } = await createAgentSession({
-		env,
-		session,
-		model,
-		systemPrompt,
-		thinkingLevel,
-		tools: [createMemoryTool(name)],
-		authStorage,
-	});
-
 	const message = positionals.join(" ").trim();
 
 	// `--print` forces single-shot mode; it requires an inline message.
@@ -156,17 +149,75 @@ async function runAgent(name: string, positionals: string[], args: Args): Promis
 			process.stderr.write(`Print mode needs a message: ${APP_NAME} ${name} --print "<message>"\n`);
 			return 1;
 		}
+		const { harness } = await openHarness(name, {
+			fresh: args.new,
+			config,
+			model,
+			thinkingLevel,
+			authStorage,
+		});
 		return runPrintMode(harness, { message });
 	}
 
 	// An inline message without `--print` is still answered once, then exits.
 	if (message) {
+		const { harness } = await openHarness(name, {
+			fresh: args.new,
+			config,
+			model,
+			thinkingLevel,
+			authStorage,
+		});
 		return runPrintMode(harness, { message });
 	}
 
 	// No message: open the interactive TUI chat loop.
-	await new InteractiveMode(harness, { name, purpose: config.purpose }).run();
+	let fresh = args.new;
+	while (true) {
+		const currentConfig = loadAgentConfig(name);
+		const { harness } = await openHarness(name, {
+			fresh,
+			config: currentConfig,
+			model,
+			thinkingLevel,
+			authStorage,
+		});
+		const { restart } = await new InteractiveMode(harness, {
+			name,
+			purpose: currentConfig.purpose,
+			commissioned: isCommissioned(currentConfig),
+		}).run();
+		if (!restart) break;
+		fresh = true;
+	}
 	return 0;
+}
+
+interface OpenHarnessOptions {
+	fresh?: boolean;
+	config: AgentConfig;
+	model: CreateAgentSessionOptions["model"];
+	thinkingLevel: NonNullable<CreateAgentSessionOptions["thinkingLevel"]>;
+	authStorage: AuthStorage;
+}
+
+async function openHarness(name: string, options: OpenHarnessOptions): Promise<CreateAgentSessionResult> {
+	const { session, env } = await openAgentSession(name, { fresh: options.fresh });
+
+	// Read curated memory ONCE and freeze it into the prompt. Mid-session edits
+	// via the self_update tool persist to disk but only enter the prompt next session.
+	const { soul, memory, user } = loadMemory(name);
+	const systemPrompt = buildSystemPrompt({ config: options.config, soul, memory, user });
+
+	return createAgentSession({
+		env,
+		session,
+		model: options.model,
+		systemPrompt,
+		thinkingLevel: options.thinkingLevel,
+		tools: [createSelfUpdateTool(name)],
+		authStorage: options.authStorage,
+	});
 }
 
 /**

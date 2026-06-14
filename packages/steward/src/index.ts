@@ -12,8 +12,10 @@ export {
 	type AgentConfig,
 	AgentConfigSchema,
 	agentExists,
+	commissionAgent,
 	type CreateAgentOptions,
 	createAgent,
+	isCommissioned,
 	isValidAgentName,
 	listAgents,
 	loadAgentConfig,
@@ -33,6 +35,7 @@ export {
 	MEMORY_BUDGET,
 	type Memory,
 	readMemoryFile,
+	SOUL_BUDGET,
 	USER_BUDGET,
 	writeMemoryFile,
 } from "./core/memory.ts";
@@ -54,8 +57,19 @@ export {
 } from "./core/session.ts";
 export { getDefaultModel, getDefaultProvider } from "./core/settings.ts";
 export { type BuildSystemPromptOptions, buildSystemPrompt } from "./core/system-prompt.ts";
-export { createMemoryTool, type MemoryToolDetails, type MemoryToolInput } from "./core/tools/memory.ts";
+export {
+	createMemoryTool,
+	createSelfUpdateTool,
+	type MemoryToolDetails,
+	type MemoryToolInput,
+	type SelfUpdateToolDetails,
+	type SelfUpdateToolInput,
+} from "./core/tools/memory.ts";
 export { main } from "./main.ts";
-export { InteractiveMode, type InteractiveModeOptions } from "./modes/interactive/interactive-mode.ts";
+export {
+	InteractiveMode,
+	type InteractiveModeOptions,
+	type InteractiveModeResult,
+} from "./modes/interactive/interactive-mode.ts";
 export { getEditorTheme, getMarkdownTheme, getSelectListTheme, style } from "./modes/interactive/theme.ts";
 export { runPrintMode } from "./modes/print-mode.ts";

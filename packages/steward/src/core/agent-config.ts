@@ -1,7 +1,7 @@
 /**
- * Per-agent identity config (`agent.json`).
+ * Per-agent config (`agent.json`).
  *
- * Net-new for steward (pi/coding-agent have no agent identity), but it reuses
+ * Net-new for steward (pi/coding-agent have no agent config), but it reuses
  * coding-agent's conventions: typebox `*Schema` + `Compile(...)` validation (as
  * in model-registry.ts's `ModelsConfigSchema`/`validateModelsConfig`), plain
  * `readFileSync`/`writeFileSync` IO, and `create*`/`load*`/`save*`/`list*` verbs.
@@ -16,6 +16,7 @@ import {
 	getAgentsRoot,
 	getMemoryPath,
 	getSessionsDir,
+	getSoulPath,
 	getUserMemoryPath,
 	getWorkspaceDir,
 } from "../config.ts";
@@ -27,6 +28,7 @@ export const AgentConfigSchema = Type.Object({
 	name: Type.String(),
 	purpose: Type.String(),
 	createdAt: Type.String(),
+	commissionedAt: Type.Optional(Type.Union([Type.String(), Type.Null()])),
 	model: Type.Optional(Type.String()),
 });
 
@@ -63,6 +65,20 @@ export function saveAgentConfig(name: string, config: AgentConfig): void {
 	writeFileSync(getAgentConfigPath(name), `${JSON.stringify(config, null, 2)}\n`, "utf-8");
 }
 
+export function isCommissioned(config: AgentConfig): boolean {
+	return Boolean(config.commissionedAt);
+}
+
+/** Set commissionedAt once (idempotent: returns existing config if already set). */
+export function commissionAgent(name: string): AgentConfig {
+	const config = loadAgentConfig(name);
+	if (config.commissionedAt) return config;
+
+	const updated: AgentConfig = { ...config, commissionedAt: new Date().toISOString() };
+	saveAgentConfig(name, updated);
+	return updated;
+}
+
 /** All agents under the agents root, sorted by name. Skips non-agent dirs. */
 export function listAgents(): AgentConfig[] {
 	const root = getAgentsRoot();
@@ -87,7 +103,7 @@ export interface CreateAgentOptions {
 	model?: string;
 }
 
-/** Create an agent's home tree (`agent.json`, empty memory files, sessions/, workspace/). */
+/** Create an agent's home tree (`agent.json`, empty self-maintenance files, sessions/, workspace/). */
 export function createAgent(options: CreateAgentOptions): AgentConfig {
 	const { name, purpose, model } = options;
 	if (!isValidAgentName(name)) {
@@ -108,11 +124,13 @@ export function createAgent(options: CreateAgentOptions): AgentConfig {
 		name,
 		purpose,
 		createdAt: new Date().toISOString(),
+		commissionedAt: null,
 		...(model ? { model } : {}),
 	};
 	saveAgentConfig(name, config);
 
-	// Empty curated memory files; populated via the memory tool (Phase 2).
+	// Empty curated self-maintenance files; populated via the self_update tool.
+	if (!existsSync(getSoulPath(name))) writeFileSync(getSoulPath(name), "", "utf-8");
 	if (!existsSync(getMemoryPath(name))) writeFileSync(getMemoryPath(name), "", "utf-8");
 	if (!existsSync(getUserMemoryPath(name))) writeFileSync(getUserMemoryPath(name), "", "utf-8");
 

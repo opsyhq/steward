@@ -26,6 +26,7 @@ import {
 	Text,
 	TUI,
 } from "@opsyhq/tui";
+import { commissionAgent } from "../../core/agent-config.ts";
 import { collectText, isFailureMessage } from "../message.ts";
 import { getEditorTheme, getMarkdownTheme, style } from "./theme.ts";
 
@@ -37,6 +38,12 @@ export interface InteractiveModeOptions {
 	name: string;
 	/** Agent purpose, shown under the name when present. */
 	purpose?: string;
+	/** Whether the human-held autonomy latch has been set. */
+	commissioned?: boolean;
+}
+
+export interface InteractiveModeResult {
+	restart: boolean;
 }
 
 function isAssistantMessage(message: AgentMessage): message is AssistantMessage {
@@ -46,6 +53,7 @@ function isAssistantMessage(message: AgentMessage): message is AssistantMessage 
 export class InteractiveMode {
 	private readonly host: AgentHarness;
 	private readonly options: InteractiveModeOptions;
+	private readonly agentName: string;
 	private readonly ui: TUI;
 	private readonly chatContainer: Container;
 	private readonly statusContainer: Container;
@@ -56,15 +64,17 @@ export class InteractiveMode {
 
 	private unsubscribe?: () => void;
 	private removeInputListener?: () => void;
-	private resolveExit?: () => void;
+	private resolveExit?: (result: InteractiveModeResult) => void;
 	private busy = false;
 	private streamingMarkdown?: Markdown;
 	private lastSigintTime = 0;
 	private stopped = false;
+	private restart = false;
 
 	constructor(host: AgentHarness, options: InteractiveModeOptions) {
 		this.host = host;
 		this.options = options;
+		this.agentName = options.name;
 		this.ui = new TUI(new ProcessTerminal());
 		this.chatContainer = new Container();
 		this.statusContainer = new Container();
@@ -76,7 +86,7 @@ export class InteractiveMode {
 		this.loader.stop();
 	}
 
-	run(): Promise<void> {
+	run(): Promise<InteractiveModeResult> {
 		this.editor.onSubmit = (text) => {
 			void this.handleSubmit(text);
 		};
@@ -95,7 +105,7 @@ export class InteractiveMode {
 		this.ui.setFocus(this.editor);
 		this.ui.start();
 
-		return new Promise<void>((resolve) => {
+		return new Promise<InteractiveModeResult>((resolve) => {
 			this.resolveExit = resolve;
 		});
 	}
@@ -107,7 +117,7 @@ export class InteractiveMode {
 		this.unsubscribe?.();
 		this.removeInputListener?.();
 		this.ui.stop();
-		this.resolveExit?.();
+		this.resolveExit?.({ restart: this.restart });
 	}
 
 	private appendHeader(): void {
@@ -116,6 +126,13 @@ export class InteractiveMode {
 		const trimmedPurpose = purpose?.trim();
 		if (trimmedPurpose) {
 			lines.push(style.dim(trimmedPurpose));
+		}
+		if (!this.options.commissioned) {
+			lines.push(
+				style.dim(
+					"Not commissioned yet. The agent is forming and will ask to be commissioned; /commission finalizes manually.",
+				),
+			);
 		}
 		lines.push(style.dim("Ctrl+C to exit."));
 		this.chatContainer.addChild(new Text(lines.join("\n"), 1, 0));
@@ -127,6 +144,19 @@ export class InteractiveMode {
 		if (trimmed.length === 0 || this.busy) return;
 		this.editor.setText("");
 		this.statusContainer.clear();
+		if (trimmed === "/commission" || trimmed === "/finalize") {
+			if (this.options.commissioned) {
+				this.appendErrorLine("Already commissioned.");
+				this.ui.requestRender();
+				return;
+			}
+			commissionAgent(this.agentName);
+			this.appendToolLine("✓ Commissioned — starting a fresh session.");
+			this.restart = true;
+			this.ui.requestRender();
+			this.stop();
+			return;
+		}
 		this.appendUserMessage(trimmed);
 		this.ui.requestRender();
 		try {

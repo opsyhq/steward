@@ -1,5 +1,5 @@
 /**
- * App identity and agent-home paths.
+ * App metadata and agent-home paths.
  *
  * Mirrors `@opsyhq/coding-agent`'s config.ts: the app name and config dir are
  * derived from package.json's `piConfig` block, and every on-disk location is a
@@ -96,6 +96,11 @@ export function getAgentConfigPath(name: string): string {
 /** Path to an agent's curated MEMORY.md */
 export function getMemoryPath(name: string): string {
 	return join(getAgentDir(name), "MEMORY.md");
+}
+
+/** Path to an agent's curated SOUL.md (who it is / what it's for). */
+export function getSoulPath(name: string): string {
+	return join(getAgentDir(name), "SOUL.md");
 }
 
 /** Path to an agent's curated USER.md */

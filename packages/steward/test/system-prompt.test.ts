@@ -2,10 +2,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createAgent, loadAgentConfig } from "../src/core/agent-config.ts";
-import { loadMemory } from "../src/core/memory.ts";
+import { commissionAgent, createAgent, loadAgentConfig } from "../src/core/agent-config.ts";
+import { loadMemory, writeMemoryFile } from "../src/core/memory.ts";
 import { buildSystemPrompt } from "../src/core/system-prompt.ts";
-import { createMemoryTool } from "../src/core/tools/memory.ts";
+import { createSelfUpdateTool } from "../src/core/tools/memory.ts";
+import { getSoulPath } from "../src/config.ts";
 
 let home: string;
 
@@ -21,29 +22,55 @@ afterEach(() => {
 });
 
 describe("buildSystemPrompt", () => {
-	it("includes the agent identity and purpose", () => {
+	it("includes the agent name and purpose", () => {
 		const prompt = buildSystemPrompt({ config: loadAgentConfig("scribe") });
 		expect(prompt).toContain("You are scribe");
 		expect(prompt).toContain("Keep meeting notes");
 	});
 
-	it("omits the memory block when memory is empty", () => {
-		const prompt = buildSystemPrompt({ config: loadAgentConfig("scribe"), memory: "", user: "" });
-		expect(prompt).not.toContain("Your memory");
+	it("renders the self-maintained file sections when empty", () => {
+		const prompt = buildSystemPrompt({ config: loadAgentConfig("scribe"), soul: "", memory: "", user: "" });
+		expect(prompt).toContain("### SOUL.md");
+		expect(prompt).toContain("### MEMORY.md");
+		expect(prompt).toContain("### USER.md");
 	});
 
-	it("includes a delimited, read-only memory block when present", () => {
+	it("includes delimited, read-only self-maintained files when present", () => {
 		const prompt = buildSystemPrompt({
 			config: loadAgentConfig("scribe"),
+			soul: "soul fact",
 			memory: "remembered fact",
 			user: "user fact",
 		});
 		expect(prompt).toContain("read-only this session");
 		expect(prompt).toContain("effective next session");
+		expect(prompt).toContain("### SOUL.md");
+		expect(prompt).toContain("soul fact");
 		expect(prompt).toContain("### MEMORY.md");
 		expect(prompt).toContain("remembered fact");
 		expect(prompt).toContain("### USER.md");
 		expect(prompt).toContain("user fact");
+	});
+
+	it("includes the birth instruction until commissioned", () => {
+		const prompt = buildSystemPrompt({ config: loadAgentConfig("scribe") });
+		expect(prompt).toContain("newly created and not yet commissioned");
+		expect(prompt).toContain("/commission");
+		expect(prompt).toContain("self_update");
+	});
+
+	it("omits the birth instruction after commissioning", () => {
+		const prompt = buildSystemPrompt({ config: commissionAgent("scribe") });
+		expect(prompt).not.toContain("newly created and not yet commissioned");
+		expect(prompt).not.toContain("/commission");
+	});
+
+	it("loads SOUL.md content into the prompt", () => {
+		writeMemoryFile(getSoulPath("scribe"), "I am a meeting-memory agent.\n");
+		const snapshot = loadMemory("scribe");
+		const prompt = buildSystemPrompt({ config: loadAgentConfig("scribe"), ...snapshot });
+		expect(prompt).toContain("### SOUL.md");
+		expect(prompt).toContain("I am a meeting-memory agent.");
 	});
 });
 
@@ -53,10 +80,10 @@ describe("frozen-snapshot invariant", () => {
 
 		// Session start: read memory ONCE and freeze it into the prompt.
 		const snapshot = loadMemory("scribe");
-		const frozenPrompt = buildSystemPrompt({ config, memory: snapshot.memory, user: snapshot.user });
+		const frozenPrompt = buildSystemPrompt({ config, ...snapshot });
 
-		// Mid-session: the agent writes a new fact via the memory tool.
-		const result = await createMemoryTool("scribe").execute("call-1", {
+		// Mid-session: the agent writes a new fact via the self_update tool.
+		const result = await createSelfUpdateTool("scribe").execute("call-1", {
 			file: "MEMORY",
 			op: "add",
 			content: "a brand new fact",
@@ -69,7 +96,7 @@ describe("frozen-snapshot invariant", () => {
 		// But the next session's load reflects the durable write.
 		const nextSession = loadMemory("scribe");
 		expect(nextSession.memory).toContain("a brand new fact");
-		const nextPrompt = buildSystemPrompt({ config, memory: nextSession.memory, user: nextSession.user });
+		const nextPrompt = buildSystemPrompt({ config, ...nextSession });
 		expect(nextPrompt).toContain("a brand new fact");
 	});
 });
