@@ -177,7 +177,9 @@ describe("extension subsystem wiring", () => {
 		// Live ctx works before the swap.
 		expect(() => previousRunner.createContext().cwd).not.toThrow();
 
-		await host.newSession();
+		// "deploy" reason: this test exercises the runner swap, not the forming guard,
+		// so it uses the intent that is always permitted out of any session.
+		await host.newSession({ reason: "deploy" });
 
 		// After the swap the superseded runner is invalidated: any captured ctx goes stale.
 		expect(() => previousRunner.createContext().cwd).toThrow(/stale/);
