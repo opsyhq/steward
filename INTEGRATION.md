@@ -1,149 +1,123 @@
 # Integration
 
-> An opsy agent is not a chat session (MISSION). It does not sit waiting for a
-> human to speak. It is *woken* — by an integration — runs headless, acts, and
-> goes back to sleep. It speaks to a human only if it decides to, in a session
-> it opens itself.
+An Opsy agent is not a chat session. It is a durable worker that can be reached
+from many places, run in the background, and speak to a human when needed.
 
-This doc designs **how an agent is reached and woken** — the concrete shape of
-"always on," "addressable," and "proactive" (README) and of pluggable
-integrations (MISSION, Belief #5/#6/#8). It does not design the memory model
-(the append-only record tree) or the agent loop; it designs the *source* of the
-events those react to.
+This doc is about the boundary between **integrations** and **extensions**.
 
-## 1. Two primitives
+## The Split
 
-- **Integration** — the always-on transport. It lives in the always-on plane
-  (the local daemon and the Cloudflare cloud brain that stays up when your
-  machine is off), not inside any agent session. It holds the credentials,
-  faces the network, owns the hosted email identity, and *makes sounds*: email,
-  WhatsApp, a webhook, a peer message, the clock. It delivers; it does not
-  interpret.
+**Integrations make sounds.**
 
-- **Extension** — the agent's own ear. **You must listen with an extension to be
-  woken by an integration**, and the extension is where the agent *defines how
-  it wakes*: which integration it cares about, into which session the signal
-  lands, how that signal becomes the event the agent acts on. Ships as a default
-  per integration; the agent rewrites it the same way it builds any other
-  extension (Belief #5).
+An integration is a platform-owned connection to the outside world:
+
+- GitHub webhooks
+- Telegram
+- email
+- WhatsApp
+- schedules
+- generic HTTP webhooks
+- agent-to-agent messages
+
+It faces the network, holds credentials, authenticates inbound traffic, and
+turns outside activity into visible events. A GitHub webhook arrives. A Telegram
+message arrives. The clock ticks. The integration makes that sound available.
+
+It does not decide what the agent should care about.
+
+**Extensions listen.**
+
+An extension is agent-owned behavior. It decides which sounds matter and what to
+do with them.
+
+Examples:
+
+- listen to GitHub comments in this repo
+- ignore GitHub comments unless they mention the agent
+- listen to this Telegram chat
+- pipe Telegram messages into a Steward chat session
+- turn a production alert webhook into a headless agent run
+- send the agent's reply back through Telegram or GitHub
+
+So integrations are not special workflow objects. They are transports. The
+workflow lives in extensions, like everything else the agent learns or builds.
+
+## Flow
 
 ```
-integration ──makes a sound──▶ a session is born ──▶ extension turns the signal
- (always-on plane:             (a node in the          into the event the agent acts on
-  daemon / cloud brain)         record tree)                     │
-                                      │                           ▼
-                                      └──────────▶ agent acts, records, sleeps
-                                                        │
-                                                        └─ may open a human-facing
-                                                           session, if it chooses
+outside system
+  -> integration makes a sound
+  -> extension listener matches or ignores it
+  -> matched sound becomes an agent event
+  -> event enters a session
 ```
 
-## 2. There is no lifecycle gap
+The session can be either:
 
-The objection that sinks naive designs: *the extension only exists inside a
-session, but the integration fires when no session is running.* False
-dichotomy. The firing **is** what creates the session. A sound arrives → the
-agent is reconstituted from its record tree into a fresh session → the
-extension, alive in that session from birth, turns the signal into the event.
-There was never a gap to bridge: **an inbound event is a session being born.**
+- **headless**: no human is present; the agent wakes, acts, records, sleeps
+- **user-facing**: a human is present through CLI, TUI, web, Telegram, email,
+  GitHub, etc.
 
-## 3. Integration — the always-on half
+The important point: an integration does not mean "open a chat." It means
+"something happened." The extension decides whether that becomes background work,
+a user message, both, or nothing.
 
-A durable, credentialed, network-facing transport. The platform runs it; the
-agent plugs into it. Properties that matter:
+## GitHub
 
-- It is the **only** always-on, internet-facing component, and the **only**
-  holder of network secrets (HMAC, OAuth tokens, the hosted mailbox). The agent
-  isn't running until a sound has already been received and authenticated — so
-  the model never sits on the network edge.
-- It **makes sounds and nothing more.** It does not route by purpose, decide
-  which agent cares, or shape payloads. Delivery, not judgment.
-- It belongs in the always-on plane by definition: the cloud brain holds it open
-  so the agent reacts to inbound events *even when your machine is off* (README,
-  Belief #8).
-- **Curated, small, shipped.** Email (the hosted identity) · WhatsApp · peer/A2A
-  messages · time (a schedule integration whose "sound" is the clock) · and the
-  **generic webhook** — anything that can POST. The generic one is the escape
-  hatch: it keeps the set small while the long tail of "I need a new trigger"
-  lands in *extensions*, not new transports.
+The GitHub integration receives webhooks and emits sounds:
 
-## 4. Extension — the agent-owned ear
+- issue comment created
+- PR opened
+- check failed
 
-An agent-authored adapter that subscribes to an integration and defines the
-wake. It plays **two roles against one integration**:
+A GitHub extension decides what to listen to:
 
-1. **At configure-time** (running in a session): it *declares its subscription*
-   — which integration, what to wake on, into which session/handle, how to shape
-   the signal. The declaration persists; it is part of the agent, versioned with
-   it inside the agent-owned workspace.
-2. **At wake-time**: the *same* extension is the code that turns the delivered
-   payload into the event the agent acts on.
+- this repo only
+- comments mentioning `@agent`
+- failed checks on protected branches
 
-It ships as a sensible default per integration, and the agent customizes it
-through the ordinary extension mechanism. **There is no second plugin system** —
-reachability is configured the same way as everything else the agent builds
-about itself. Without a subscribed extension, an integration's sounds are inert:
-you must listen to be woken.
+The result might be a headless run that fixes CI, a reply on GitHub, or a user
+session asking for approval.
 
-## 5. Headless is the default; human contact is chosen
+## Telegram
 
-- **Default path: woken → act → sleep.** No human in the loop, start to finish.
-  This is the normal case (Belief #6: act unattended; "not only respond to
-  prompts"), not a special one.
-- A **human-facing session is an output the agent chooses**, downstream of its
-  own reasoning — never a precondition for it to run. If, mid-task, it decides it
-  needs a person, *it* opens a human-facing session and starts that conversation.
-- So the direction of initiation **flips** from the chatbot default. Not "human
-  opens a session → agent answers." Instead: "**integration wakes the agent →
-  agent acts → agent may wake a human.**" The agent is the active party in both
-  directions: it gets woken, and it decides whether to wake anyone else.
+The Telegram integration receives messages and emits sounds.
 
-## 6. The boundary is drawn by ownership
+A Telegram extension can map a Telegram chat to a Steward user session:
 
-The split between the two primitives is **ownership**, not lifecycle:
+```
+Telegram message
+  -> Telegram sound
+  -> extension maps it into Steward chat
+  -> agent replies in Steward chat
+  -> extension sends reply back to Telegram
+```
 
-| | Integration | Extension |
-|---|---|---|
-| owned by | platform | agent |
-| lives in | always-on plane (daemon / cloud brain) | the agent's sandboxed workspace |
-| lifetime | always on | born with the session |
-| on the network edge | yes — holds secrets + mailbox | no — runs inside the sandbox |
-| changes how? | curated, shipped, pluggable | agent-authored, versioned, revertable |
+That is bidirectional chat: the integration carries messages both ways, but the
+extension owns the mapping between the external thread and the Steward session.
 
-A free consequence: because the agent only ever authors the *extension*, its
-self-modification **cannot reach the credentialed network edge** — by
-construction, not by discipline. The dangerous, vetting-worthy surface stays
-platform-owned; the infinitely-customizable surface stays with the agent.
+## Headless vs User Sessions
 
-## 7. Where this sits
+We should keep these distinct.
 
-This is the mechanism beneath three things the mission already asserts —
-*always on*, *addressable*, *proactive* — made into one model. An integration is
-how the agent is addressable (the hosted email identity is just the email
-integration); the always-on plane is where integrations live; reacting to their
-sounds is what proactive means. Agent-to-agent messaging (README: "part of the
-frame, not bolt-ons") is then **just one more integration** — peer↔peer — under
-this same split. None of it touches the memory model or the agent loop.
+**Headless session**
 
-## 8. Deferred (explicitly not designed here)
+- started by an integration, schedule, or agent
+- no human participant is assumed
+- used for background work
+- may finish silently
+- may send messages if allowed
 
-- **Authorable integrations** — whether an agent may build a *new* always-on
-  transport, not just customize extensions on shipped ones. Default stance:
-  **no** — integrations stay curated; a new transport is a durable, credentialed
-  daemon, and making those agent-authored drags the always-on / secret-holding /
-  bootstrap problem back inside the trust line. The generic webhook covers the
-  long tail. Revisit only if it actually bites.
-- **Delivery mechanics** — queue, at-least-once, dedup, backpressure between an
-  integration's sound and the session being born. Engineering, not design; its
-  own doc when it bites.
-- **Concurrency** — two sounds for one agent while a session is live. Lean:
-  serialize per handle (one live session per handle at a time), consistent with
-  deterministic reconstruction from the record tree. Detail deferred.
+**User session**
 
-**Non-goals:** inventing a transport protocol · multi-tenant routing/fairness ·
-putting the model on the network edge · designing the memory model or agent loop.
+- has a human participant
+- has a reply surface, such as TUI, web, Telegram, email, or GitHub
+- records the conversation with that human
 
----
-*Open: the minimal contract an extension declares at configure-time — the
-smallest stable shape of "wake me, like this, into here" that survives the agent
-rewriting everything around it. The next thing to nail.*
+## Open Questions
+
+- What is the smallest durable listener declaration an extension can register?
+- Are unmatched sounds stored, dropped, or only logged operationally?
+- Is one external chat thread always one Steward user session?
+- Which outbound replies require approval?
+- Can an agent author new integrations, or only extensions over shipped ones?
