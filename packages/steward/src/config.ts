@@ -64,9 +64,8 @@ export const isBunBinary =
 // e.g., STEWARD_HOME
 export const ENV_HOME = `${APP_NAME.toUpperCase()}_HOME`;
 
-// Override for the shared pi credential dir, e.g. STEWARD_CODING_AGENT_DIR.
-// Resolves the exact same `~/.steward/agent/` the pi CLI already wrote
-// auth.json/settings.json into.
+// Override for the shared credential dir, e.g. STEWARD_CODING_AGENT_DIR.
+// Resolves the shared `~/.steward/agent/` holding auth.json/settings.json.
 export const ENV_SHARED_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
 
 export function expandTildePath(path: string): string {
@@ -94,7 +93,7 @@ export function getThemesDir(): string {
 	return join(packageDir, srcOrDist, "modes", "interactive", "theme");
 }
 
-/** User's custom themes dir, e.g. ~/.steward/agent/themes (shared pi agent dir). */
+/** User's custom themes dir, e.g. ~/.steward/agent/themes (shared agent dir). */
 export function getCustomThemesDir(): string {
 	return join(getSharedAgentDir(), "themes");
 }
@@ -102,6 +101,16 @@ export function getCustomThemesDir(): string {
 /** Path to this package's README.md. Used by the read tool's docs classification. */
 export function getReadmePath(): string {
 	return resolve(join(getPackageDir(), "README.md"));
+}
+
+/** Get path to docs directory */
+export function getDocsPath(): string {
+	return resolve(join(getPackageDir(), "docs"));
+}
+
+/** Get path to examples directory */
+export function getExamplesPath(): string {
+	return resolve(join(getPackageDir(), "examples"));
 }
 
 // =============================================================================
@@ -156,16 +165,15 @@ export function getWorkspaceDir(name: string): string {
 }
 
 // =============================================================================
-// Shared pi credential store (~/.steward/agent/, written by the pi CLI)
+// Shared credential store (~/.steward/agent/)
 // =============================================================================
 //
-// Steward reuses the credentials and default model that the pi CLI already set
-// up, so a Codex OAuth login (or any env/api key) works with no re-login. These
-// getters mirror `@opsyhq/coding-agent`'s `getAgentDir()`/`getAuthPath()`/
-// `getSettingsPath()` (singular `agent`), distinct from steward's own per-agent
+// Steward reuses the credentials and default model in the shared `agent/` dir,
+// so a Codex OAuth login (or any env/api key) works with no re-login. These
+// resolve the singular shared `agent` dir, distinct from steward's own per-agent
 // homes under `agents/<name>/` (plural).
 
-/** Shared pi agent dir, e.g. ~/.steward/agent (override with STEWARD_CODING_AGENT_DIR). */
+/** Shared agent dir, e.g. ~/.steward/agent (override with STEWARD_CODING_AGENT_DIR). */
 export function getSharedAgentDir(): string {
 	const envDir = process.env[ENV_SHARED_AGENT_DIR];
 	if (envDir) return expandTildePath(envDir);
@@ -180,4 +188,9 @@ export function getAuthPath(): string {
 /** Path to the shared settings.json (defaultProvider/defaultModel). */
 export function getSettingsPath(): string {
 	return join(getSharedAgentDir(), "settings.json");
+}
+
+/** Get path to managed binaries directory (fd, rg) */
+export function getBinDir(): string {
+	return join(getSharedAgentDir(), "bin");
 }

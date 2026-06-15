@@ -1,9 +1,7 @@
 /**
  * Per-agent identity config (`agent.json`).
  *
- * Net-new for steward (pi/coding-agent have no agent identity), but it reuses
- * coding-agent's conventions: typebox `*Schema` + `Compile(...)` validation (as
- * in model-registry.ts's `ModelsConfigSchema`/`validateModelsConfig`), plain
+ * Net-new for steward. Uses typebox `*Schema` + `Compile(...)` validation, plain
  * `readFileSync`/`writeFileSync` IO, and `create*`/`load*`/`save*`/`list*` verbs.
  */
 

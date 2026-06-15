@@ -20,7 +20,9 @@
 		"./package.json": "./package.json"
 	},
 	"files": [
-		"dist"
+		"dist",
+		"docs",
+		"examples"
 	],
 	"scripts": {
 		"clean": "shx rm -rf dist",

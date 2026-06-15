@@ -1,45 +1,29 @@
 /**
- * SessionManager adapter (Tier 5 — steward-authored seam, NOT a 1-1 file port).
+ * SessionManager adapter over the engine `Session`.
  *
- * Substrate-forced divergence. pi's `core/session-manager.ts` owns session
- * persistence (it reads/writes its own JSONL). In steward the engine
- * (`@opsyhq/agent`'s `Session` + `JsonlSessionRepo`) already owns that file. A
- * 1-1 port would write a *second* parallel JSONL and fight ownership. So this
- * adapter re-expresses pi's `SessionManager` **read** surface — the 13-method
- * *synchronous* `ReadonlySessionManager` the extension API was written against —
- * directly over the **same JSONL the engine writes**, and **delegates writes**
- * to the engine `Session`. The five types Tier-4 `extensions/types.ts` imports
- * from `../session-manager.ts` are re-exported here.
+ * The engine (`@opsyhq/agent`'s `Session` + `JsonlSessionRepo`) owns the session
+ * JSONL file. This adapter exposes a synchronous read surface
+ * (`ReadonlySessionManager`) directly over that same JSONL, and delegates writes
+ * to the engine `Session`.
  *
- * Flagged divergences from pi's `session-manager.ts`:
- *  1. The class is an adapter over `Session`, not a self-owned JSONL manager.
- *  2. Leaf computation honors the engine's persisted `leaf`-redirect entries
- *     (`leafIdAfterEntry`); pi recomputed `leafId` as "last entry" in memory and
- *     never persisted a leaf entry. `leaf` entries are bookkeeping and are
- *     filtered out of the surfaced entry list (extensions keep pi's model).
- *  3. Write methods are **async** (they delegate to the engine `Session`, whose
- *     append is async) where pi's were sync-returning-string. The read contract
- *     (`ReadonlySessionManager`) is unaffected; only the write helpers differ.
- *  4. Reads are an mtime-cached file snapshot (the engine is the writer), so a
- *     just-appended entry becomes visible once the engine has flushed it.
+ * Notes:
+ *  - Leaf computation honors the engine's persisted `leaf`-redirect entries
+ *    (`leafIdAfterEntry`). `leaf` entries are bookkeeping and are filtered out of
+ *    the surfaced entry list.
+ *  - Write methods are async (they delegate to the engine `Session`, whose append
+ *    is async). The read contract is unaffected.
+ *  - Reads are an mtime-cached file snapshot (the engine is the writer), so a
+ *    just-appended entry becomes visible once the engine has flushed it.
  */
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname } from "node:path";
-import type {
-	BranchSummaryEntry,
-	CompactionEntry,
-	JsonlSessionMetadata,
-	LeafEntry,
-	Session,
-	SessionTreeEntry,
-} from "@opsyhq/agent";
+import type { JsonlSessionMetadata, LeafEntry, Session, SessionTreeEntry } from "@opsyhq/agent";
 
-// The five names Tier-4 `extensions/types.ts` imports from "../session-manager.ts".
+// The names `extensions/types.ts` imports from "../session-manager.ts".
 // SessionEntry/CompactionEntry/BranchSummaryEntry are the engine's structurally
-// identical equivalents (re-aliased so import paths stay byte-identical to pi's).
-export type { BranchSummaryEntry, CompactionEntry } from "@opsyhq/agent";
-export type { SessionTreeEntry as SessionEntry } from "@opsyhq/agent";
+// identical equivalents, re-aliased here.
+export type { BranchSummaryEntry, CompactionEntry, SessionTreeEntry as SessionEntry } from "@opsyhq/agent";
 
 /** Session header (first JSONL line). */
 export interface SessionHeader {
@@ -274,7 +258,7 @@ export class SessionManager {
 	}
 
 	// =========================================================================
-	// Write surface — delegates to the engine Session (async; see flag #3)
+	// Write surface — delegates to the engine Session (async)
 	// =========================================================================
 
 	appendCustomEntry(customType: string, data?: unknown): Promise<string> {

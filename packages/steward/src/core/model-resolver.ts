@@ -1,13 +1,15 @@
 /**
  * Model resolution.
  *
- * steward has no `ModelRegistry`, so `resolveCliModel` reads pi-ai's
- * built-in catalog via `getAllModels()` as the source of the candidate list.
+ * `resolveCliModel` resolves `--model` against the `ModelRegistry`, so built-in
+ * models, custom `models.json` entries, and OAuth-adjusted models are all
+ * candidates.
  */
 
-import { type Api, getModels, getProviders, type KnownProvider, type Model } from "@earendil-works/pi-ai";
+import type { Api, KnownProvider, Model } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@opsyhq/agent";
 import { isValidThinkingLevel } from "../cli/args.ts";
+import type { ModelRegistry } from "./model-registry.ts";
 
 /** Default model IDs for each known provider */
 export const defaultModelPerProvider: Record<KnownProvider, string> = {
@@ -51,15 +53,6 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
 export interface ScopedModel {
 	model: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
-}
-
-/** Every model pi-ai knows about, across all known providers. */
-export function getAllModels(): Model<Api>[] {
-	const models: Model<Api>[] = [];
-	for (const provider of getProviders()) {
-		models.push(...getModels(provider));
-	}
-	return models;
 }
 
 /**
@@ -247,19 +240,22 @@ export function resolveCliModel(options: {
 	cliProvider?: string;
 	cliModel?: string;
 	cliThinking?: string;
+	modelRegistry: ModelRegistry;
 }): ResolveCliModelResult {
-	const { cliProvider, cliModel, cliThinking } = options;
+	const { cliProvider, cliModel, cliThinking, modelRegistry } = options;
 
 	if (!cliModel) {
 		return { model: undefined, warning: undefined, error: undefined };
 	}
 
-	const availableModels = getAllModels();
+	// Use *all* models here, not just models with pre-configured auth, so an
+	// api key passed for first-time setup can still select its model.
+	const availableModels = modelRegistry.getAll();
 	if (availableModels.length === 0) {
 		return {
 			model: undefined,
 			warning: undefined,
-			error: "No models available. Check your @earendil-works/pi-ai installation.",
+			error: "No models available. Check your installation or add models to models.json.",
 		};
 	}
 

@@ -1,11 +1,9 @@
 /**
  * The `memory` tool — durable edits to the agent's curated MEMORY.md / USER.md.
  *
- * Mirrors coding-agent's tool-factory convention (`createReadTool` →
- * `createMemoryTool`): one factory bound to a cwd/agent, returning an
- * `AgentTool`. Operations (add/replace/remove) are modeled on hermes' memory
- * tool. Writes are durable immediately but only enter the system prompt on the
- * NEXT session (frozen-snapshot rule), so results say "effective next session".
+ * A factory (`createMemoryTool`) bound to a cwd/agent, returning an `AgentTool`.
+ * Writes are durable immediately but only enter the system prompt on the NEXT
+ * session (frozen-snapshot rule), so results say "effective next session".
  *
  * SOUL.md (who the agent is) is deliberately NOT handled here — it's a free-form
  * file the agent rewrites with the bash tool. This tool stays line-oriented and

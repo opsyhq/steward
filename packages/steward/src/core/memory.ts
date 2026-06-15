@@ -1,7 +1,7 @@
 /**
  * Tier-1 curated memory: MEMORY.md (the agent's own notebook) and USER.md (facts
- * about the user). Net-new for steward, but reuses coding-agent's IO style —
- * plain `readFileSync`/`writeFileSync` — and `load*`/`read*`/`write*` verbs.
+ * about the user). Net-new for steward. Plain `readFileSync`/`writeFileSync` IO
+ * and `load*`/`read*`/`write*` verbs.
  *
  * Frozen-snapshot rule: `loadMemory()` is read ONCE at session start and baked
  * into the system prompt. Mid-session writes (via the memory tool) land on disk

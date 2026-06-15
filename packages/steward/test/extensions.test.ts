@@ -20,8 +20,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getAgentDir } from "../src/config.ts";
 import { createAgent } from "../src/core/agent-config.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { SessionHost } from "../src/core/session-host.ts";
+import { convertToLlm, createBashExecutionMessage } from "../src/core/messages.ts";
 import { openAgentSession } from "../src/core/session.ts";
+import { SessionHost } from "../src/core/session-host.ts";
 
 const AGENT = "scribe";
 
@@ -65,6 +66,49 @@ description: Guidance for taking structured, durable meeting notes.
 # Note Taking
 
 Take clear, structured notes.
+`;
+
+// Registers a `/greet` command that records its raw argument string to the marker dir.
+const COMMAND_EXTENSION_SOURCE = `
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+export default function commandExtension(pi) {
+	pi.registerCommand("greet", {
+		description: "Greets the provided name.",
+		async handler(args) {
+			const dir = process.env.STEWARD_TEST_MARKER_DIR;
+			if (dir) writeFileSync(join(dir, "command.json"), JSON.stringify({ args }));
+		},
+	});
+}
+`;
+
+// Transforms the literal input "raw" into "transformed"; short-circuits "skipme".
+const INPUT_EXTENSION_SOURCE = `
+export default function inputExtension(pi) {
+	pi.on("input", (event) => {
+		if (event.text === "raw") return { action: "transform", text: "transformed" };
+		if (event.text === "skipme") return { action: "handled" };
+		return { action: "continue" };
+	});
+}
+`;
+
+// Handles user_bash itself, returning a synthetic result keyed off the command.
+const USER_BASH_EXTENSION_SOURCE = `
+export default function bashExtension(pi) {
+	pi.on("user_bash", (event) => ({
+		result: { output: "intercepted:" + event.command, exitCode: 0, cancelled: false, truncated: false },
+	}));
+}
+`;
+
+// Throws while loading, so the loader records it as an extension load error.
+const BROKEN_EXTENSION_SOURCE = `
+export default function brokenExtension() {
+	throw new Error("boom");
+}
 `;
 
 let home: string;
@@ -163,9 +207,12 @@ describe("extension subsystem wiring", () => {
 		const { session } = await openAgentSession(AGENT, { fresh: false });
 		const entries = await session.getEntries();
 		const assistant = entries.find((e) => e.type === "message" && e.message.role === "assistant");
-		if (!assistant || assistant.type !== "message") throw new Error("no persisted assistant message");
+		if (!assistant || assistant.type !== "message" || assistant.message.role !== "assistant") {
+			throw new Error("no persisted assistant message");
+		}
 		const content = assistant.message.content;
-		const text = typeof content === "string" ? content : content.map((c) => (c.type === "text" ? c.text : "")).join("");
+		const text =
+			typeof content === "string" ? content : content.map((c) => (c.type === "text" ? c.text : "")).join("");
 		expect(text).toBe("MUTATED_BY_EXTENSION");
 	});
 
@@ -188,4 +235,143 @@ describe("extension subsystem wiring", () => {
 		expect(() => host.extensionRunner.createContext().cwd).not.toThrow();
 		await host.cleanup();
 	});
+
+	it("runs an extension command and does not reach the model", async () => {
+		writeFileSync(join(getAgentDir(AGENT), "extensions", "cmd-ext.ts"), COMMAND_EXTENSION_SOURCE, "utf-8");
+		const { host, registration } = makeHost();
+		await host.start({ fresh: true });
+
+		await host.prompt("/greet there");
+
+		const marker = JSON.parse(readFileSync(join(markerDir, "command.json"), "utf-8"));
+		expect(marker).toEqual({ args: "there" });
+		// The command handled the input itself — no model turn ran.
+		expect(registration.state.callCount).toBe(0);
+		await host.cleanup();
+	});
+
+	it("applies an input transform and short-circuits a handled input", async () => {
+		writeFileSync(join(getAgentDir(AGENT), "extensions", "input-ext.ts"), INPUT_EXTENSION_SOURCE, "utf-8");
+		const { host, registration } = makeHost();
+		let capturedUserText = "";
+		registration.setResponses([
+			(context) => {
+				const lastUser = [...context.messages].reverse().find((m) => m.role === "user");
+				capturedUserText = lastUser ? messageText(lastUser.content) : "";
+				return fauxAssistantMessage("ok");
+			},
+		]);
+
+		await host.start({ fresh: true });
+
+		// "raw" is rewritten before reaching the model.
+		await host.prompt("raw");
+		expect(capturedUserText).toBe("transformed");
+
+		// "skipme" is fully handled by the extension — no further model turn.
+		const callsBefore = registration.state.callCount;
+		await host.prompt("skipme");
+		expect(registration.state.callCount).toBe(callsBefore);
+		await host.cleanup();
+	});
+
+	it("lets an extension handle user_bash and returns its result", async () => {
+		writeFileSync(join(getAgentDir(AGENT), "extensions", "bash-ext.ts"), USER_BASH_EXTENSION_SOURCE, "utf-8");
+		const { host } = makeHost();
+		await host.start({ fresh: true });
+
+		const result = await host.extensionRunner.emitUserBash({
+			type: "user_bash",
+			command: "echo hi",
+			excludeFromContext: false,
+			cwd: host.getCwd(),
+		});
+
+		expect(result?.result?.output).toBe("intercepted:echo hi");
+		await host.cleanup();
+	});
+
+	it("records ! bash output into context and excludes !!", () => {
+		const bashResult = { output: "a.txt\nb.txt\n", exitCode: 0, cancelled: false, truncated: false };
+		const included = createBashExecutionMessage("ls", bashResult, { excludeFromContext: false });
+		const excluded = createBashExecutionMessage("ls", bashResult, { excludeFromContext: true });
+
+		// `!` enters the model context as a user message carrying the command + output.
+		const convertedIncluded = convertToLlm([included]);
+		expect(convertedIncluded).toHaveLength(1);
+		expect(convertedIncluded[0].role).toBe("user");
+		expect(messageText(convertedIncluded[0].content)).toContain("ls");
+		expect(messageText(convertedIncluded[0].content)).toContain("a.txt");
+
+		// `!!` is recorded for display but withheld from the model context.
+		expect(convertToLlm([excluded])).toHaveLength(0);
+	});
+
+	it("reload picks up new resources and preserves the transcript", async () => {
+		const { host, registration } = makeHost();
+		registration.setResponses([() => fauxAssistantMessage("hi there")]);
+		await host.start({ fresh: true });
+		await host.prompt("hello");
+
+		const messagesBefore = host.getEntries().filter((e) => e.type === "message").length;
+		expect(messagesBefore).toBeGreaterThan(0);
+
+		const agentDir = getAgentDir(AGENT);
+		const skillDir = join(agentDir, "skills", "research");
+		mkdirSync(skillDir, { recursive: true });
+		writeFileSync(
+			join(skillDir, "SKILL.md"),
+			"---\nname: research\ndescription: Research helper.\n---\n\n# Research\n",
+			"utf-8",
+		);
+		mkdirSync(join(agentDir, "prompts"), { recursive: true });
+		writeFileSync(
+			join(agentDir, "prompts", "summarize.md"),
+			"---\ndescription: Summarize.\n---\nSummarize: $ARGUMENTS\n",
+			"utf-8",
+		);
+		writeFileSync(join(agentDir, "extensions", "cmd-ext.ts"), COMMAND_EXTENSION_SOURCE, "utf-8");
+
+		await host.reload();
+
+		const commandNames = host.getCommands().map((c) => c.name);
+		expect(commandNames).toContain("skill:research");
+		expect(commandNames).toContain("summarize");
+		expect(commandNames).toContain("greet");
+		// No new harness on reload — the conversation survives.
+		expect(host.getEntries().filter((e) => e.type === "message").length).toBe(messagesBefore);
+		await host.cleanup();
+	});
+
+	it("reports resource counts and load errors in the resource summary", async () => {
+		const { host } = makeHost();
+		await host.start({ fresh: true });
+
+		const summary = host.getResourceSummary();
+		expect(summary.extensions).toBeGreaterThanOrEqual(1);
+		expect(summary.skills).toBeGreaterThanOrEqual(1);
+		expect(summary.diagnostics).toEqual([]);
+
+		writeFileSync(join(getAgentDir(AGENT), "extensions", "broken.ts"), BROKEN_EXTENSION_SOURCE, "utf-8");
+		await host.reload();
+
+		const afterReload = host.getResourceSummary();
+		expect(afterReload.diagnostics.some((d) => d.type === "error" && d.message.includes("boom"))).toBe(true);
+		await host.cleanup();
+	});
+
+	it("ships docs and examples in the published package", () => {
+		const pkg = JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf-8"));
+		expect(pkg.files).toContain("docs");
+		expect(pkg.files).toContain("examples");
+	});
 });
+
+/** Flatten a message content union (string | content blocks) to its text. */
+function messageText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		return content.map((block) => (block && block.type === "text" ? block.text : "")).join("");
+	}
+	return "";
+}

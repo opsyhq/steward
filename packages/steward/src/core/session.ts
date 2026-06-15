@@ -1,10 +1,9 @@
 /**
  * Per-agent session open/resume.
  *
- * Analogous to coding-agent's core/session-manager.ts (SessionManager), but
- * minimal: the engine's `JsonlSessionRepo` already provides the durable,
- * append-only session tree. Sessions are keyed by AGENT, not by the user's cwd
- * (see the key-by-agent note below).
+ * A minimal session manager: the engine's `JsonlSessionRepo` already provides the
+ * durable, append-only session tree. Sessions are keyed by AGENT, not by the
+ * user's cwd (see the key-by-agent note below).
  */
 
 import { type JsonlSessionMetadata, JsonlSessionRepo, type Session } from "@opsyhq/agent";

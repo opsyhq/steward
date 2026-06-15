@@ -107,10 +107,8 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 	return { shell: "sh", args: ["-c"] };
 }
 
-// Deviation from `@opsyhq/coding-agent`: pi prepends a managed bin dir
-// (`getBinDir()`, where it auto-downloads ripgrep/fd) onto PATH here. Steward has
-// no managed bin dir — it resolves external tools from PATH (see
-// utils/tools-manager.ts) — so the shell env is the process env unchanged.
+// External tools are resolved from PATH (see utils/tools-manager.ts), so the
+// shell env is the process env unchanged.
 export function getShellEnv(): NodeJS.ProcessEnv {
 	return {
 		...process.env,

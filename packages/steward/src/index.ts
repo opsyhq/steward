@@ -1,8 +1,7 @@
 /**
  * Public barrel for `@opsyhq/steward`.
  *
- * Mirrors `@opsyhq/coding-agent`'s index.ts: re-export the agent builder, system
- * prompt, model resolver, and key types. Grows per phase.
+ * Re-exports the agent builder, system prompt, model resolver, and key types.
  */
 
 export { type Args, parseArgs, printHelp } from "./cli/args.ts";

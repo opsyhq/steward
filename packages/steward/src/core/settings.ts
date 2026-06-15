@@ -1,11 +1,9 @@
 /**
- * Reader for the shared pi settings.json (~/.steward/agent/settings.json).
+ * Reader for the shared settings.json (~/.steward/agent/settings.json).
  *
- * Mirrors `@opsyhq/coding-agent`'s `SettingsManager.getDefaultProvider()`/
- * `getDefaultModel()` getters but stays minimal: a plain read of the file the pi
- * CLI already wrote, no schema and no writer. Steward only needs the default
- * provider/model to seed model resolution when neither `--model` nor agent.json
- * specifies one.
+ * A plain read of the shared settings file, no schema and no writer. Steward
+ * only needs the default provider/model to seed model resolution when neither
+ * `--model` nor agent.json specifies one.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -16,9 +14,8 @@ interface SharedSettings {
 	defaultModel?: string;
 }
 
-// Parsed once per process and reused, mirroring coding-agent's SettingsManager
-// (which parses in its constructor) so the getters are cheap field reads rather
-// than a fresh disk read each. The CLI reads this file once at startup.
+// Parsed once per process and reused so the getters are cheap field reads
+// rather than a fresh disk read each. The CLI reads this file once at startup.
 let cachedSettings: SharedSettings | undefined;
 
 function readSettings(): SharedSettings {

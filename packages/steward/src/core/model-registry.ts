@@ -24,10 +24,8 @@ import { join } from "path";
 import { type Static, Type } from "typebox";
 import { Compile } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
-// Substrate-forced divergence: steward renamed pi's zero-arg getAgentDir() to a
-// per-agent getAgentDir(name); the shared (singular `agent/`) credential dir pi
-// used is getSharedAgentDir(). Alias keeps the `getAgentDir()` call site below
-// (the models.json default) byte-identical to pi.
+// The models.json default lives in the shared (singular `agent/`) credential
+// dir; aliased to getAgentDir() for the call site below.
 import { getSharedAgentDir as getAgentDir } from "../config.ts";
 import { warnDeprecation } from "../utils/deprecation.ts";
 import { stripJsonComments } from "../utils/json.ts";

@@ -1,10 +1,9 @@
 /**
  * Real CLI entry point.
  *
- * Mirrors `@opsyhq/coding-agent`'s main.ts — `main(args): Promise<number>` parses
- * argv, intercepts subcommands, then resolves a model, builds the agent via
- * `createAgentSession`, and dispatches to a mode. Phase 1 wires the agent home:
- * `new` / `list` / `<name>`. Interactive mode replaces the print path in Phase 3.
+ * `main(args): Promise<number>` parses argv, intercepts subcommands, then
+ * resolves a model, builds the agent via `createAgentSession`, and dispatches to
+ * a mode. Subcommands wire the agent home: `new` / `list` / `<name>`.
  */
 
 import { createInterface } from "node:readline";
@@ -21,6 +20,7 @@ import {
 } from "./core/agent-config.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
 import { DEFAULT_MODEL, DEFAULT_THINKING_LEVEL } from "./core/defaults.ts";
+import { ModelRegistry } from "./core/model-registry.ts";
 import { resolveCliModel } from "./core/model-resolver.ts";
 import { SessionHost } from "./core/session-host.ts";
 import { getDefaultModel, getDefaultProvider } from "./core/settings.ts";
@@ -153,11 +153,15 @@ async function runSession(
 ): Promise<number> {
 	const initialConfig = loadAgentConfig(name);
 
-	// Model precedence: --model flag → agent.json → shared pi default → built-in.
+	const authStorage = AuthStorage.create();
+	const modelRegistry = ModelRegistry.create(authStorage);
+
+	// Model precedence: --model flag → agent.json → shared default → built-in.
 	const resolved = resolveCliModel({
 		cliProvider: args.provider,
 		cliModel: args.model ?? initialConfig.model ?? sharedDefaultModel() ?? DEFAULT_MODEL,
 		cliThinking: args.thinking,
+		modelRegistry,
 	});
 	if (resolved.warning) {
 		process.stderr.write(`${resolved.warning}\n`);
@@ -172,9 +176,8 @@ async function runSession(
 	// → env var. hasAuth() doesn't refresh tokens — it just checks something exists.
 	// If it returns false, every credential source (including the env var) is absent,
 	// so the only actionable hint is to log in.
-	const authStorage = AuthStorage.create();
 	if (!authStorage.hasAuth(model.provider)) {
-		process.stderr.write(`No credentials found for provider "${model.provider}". Log in with the pi CLI.\n`);
+		process.stderr.write(`No credentials found for provider "${model.provider}". Log in with the steward CLI.\n`);
 		return 1;
 	}
 
@@ -209,7 +212,7 @@ async function runSession(
 }
 
 /**
- * The shared pi default model as a `provider/model` reference (or just the model
+ * The shared default model as a `provider/model` reference (or just the model
  * id when no provider is set), read from `~/.steward/agent/settings.json`. Used
  * to seed model resolution when neither `--model` nor agent.json picks a model.
  */
