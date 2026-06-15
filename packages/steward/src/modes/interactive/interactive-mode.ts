@@ -12,8 +12,14 @@
  * an `AgentHarnessError("hook")` and would abort the turn.
  */
 
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { type AgentHarness, AgentHarnessError, type AgentHarnessEvent, type AgentMessage } from "@opsyhq/agent";
+import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
+import {
+	type AgentHarness,
+	AgentHarnessError,
+	type AgentHarnessEvent,
+	type AgentMessage,
+	type SessionContext,
+} from "@opsyhq/agent";
 import {
 	type AutocompleteProvider,
 	CombinedAutocompleteProvider,
@@ -35,6 +41,7 @@ import { executeBashWithOperations } from "../../core/bash-executor.ts";
 import type { AutocompleteProviderFactory } from "../../core/extensions/index.ts";
 import { KeybindingsManager } from "../../core/keybindings.ts";
 import type { SessionHost } from "../../core/session-host.ts";
+import { parseSkillBlock } from "../../core/skills.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { createLocalBashOperations } from "../../core/tools/bash.ts";
@@ -43,8 +50,12 @@ import { ensureTool } from "../../utils/tools-manager.ts";
 import { isFailureMessage } from "../message.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
+import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
+import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
+import { CustomMessageComponent } from "./components/custom-message.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { rawKeyHint } from "./components/keybinding-hints.ts";
+import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { getEditorTheme, getMarkdownTheme, initTheme, theme } from "./theme/theme.ts";
@@ -198,9 +209,18 @@ export class InteractiveMode {
 		this.ui.setFocus(this.editor);
 		this.ui.start();
 
+		// Paint the resumed transcript (the persisted opener + any prior turns). On
+		// birth the session is empty, so this renders nothing and the seed below paints
+		// the opener once.
+		this.renderInitialMessages();
+
 		// Seed an assistant opener instead of running a user turn: a newly born agent
 		// opens the chat itself. Fire-and-forget — run() returns the exit promise.
-		if (this.options.initialAssistantMessage) {
+		// Gated on `!hasMessageEntries` so the seed is strictly idempotent: if a `message`
+		// entry already exists (resume, or a `new` run against a populated session) the
+		// opener was already rendered by `renderInitialMessages` and is not re-seeded.
+		const hasMessageEntries = this.sessionHost.getEntries().some((e) => e.type === "message");
+		if (this.options.initialAssistantMessage && !hasMessageEntries) {
 			void this.seedInitialAssistantMessage(this.options.initialAssistantMessage);
 		}
 
@@ -498,12 +518,17 @@ export class InteractiveMode {
 	 * Transcript-neutral — callers decide whether to clear the chat log (deploy keeps it,
 	 * `/new` clears it). Returns `false` (after surfacing the error and keeping the old
 	 * harness live) if the swap failed.
+	 *
+	 * `reason` records the caller's intent for the host primitive: it refuses a `"new"`
+	 * swap while the agent is still forming (the birth-session invariant — see
+	 * `SessionHost.newSession`). A thrown `newSession()` degrades gracefully here (old
+	 * harness kept live, error surfaced).
 	 */
-	private async swapToNewSession(): Promise<boolean> {
+	private async swapToNewSession(reason: "deploy" | "new"): Promise<boolean> {
 		this.unsubscribe?.();
 		try {
 			// On success the host swaps in the new harness; on failure it keeps the old.
-			await this.sessionHost.newSession();
+			await this.sessionHost.newSession({ reason });
 		} catch (error) {
 			this.subscribeToHost();
 			this.appendErrorLine(error instanceof Error ? error.message : String(error));
@@ -532,7 +557,9 @@ export class InteractiveMode {
 	private async doDeploy(): Promise<void> {
 		const name = this.sessionHost.config.name;
 		deployAgent(name);
-		if (!(await this.swapToNewSession())) return;
+		// `"deploy"` intent: this is the one swap allowed out of a forming session. The
+		// latch was just flipped on disk above, so the host's backstop sees it as deployed.
+		if (!(await this.swapToNewSession("deploy"))) return;
 		this.chatContainer.addChild(new Text(theme.fg("dim", "✓ Deployed — fresh session started."), 1, 0));
 		this.ui.setFocus(this.editor);
 		this.ui.requestRender();
@@ -545,14 +572,24 @@ export class InteractiveMode {
 	 *    deploy uses) rather than pi's one-liner.
 	 *  - pi's `result.cancelled` (newSession can prompt-to-save) has no steward analog —
 	 *    steward's `newSession()` never cancels.
-	 *  - pi's `renderCurrentSessionState()` rebuilds the view from the now-empty session;
-	 *    steward has no such method, so it clears the chat log and re-renders the header.
 	 *  - pi's `handleFatalRuntimeError` is `swapToNewSession`'s `appendErrorLine` path.
+	 *
+	 * Forming guard: while the agent is undeployed it stays in its single birth session,
+	 * so `/new` is refused here (the primary guard) and again at the host primitive (the
+	 * backstop — see `SessionHost.newSession`'s invariant).
 	 */
 	private async handleNewCommand(): Promise<void> {
-		if (!(await this.swapToNewSession())) return;
-		this.chatContainer.clear();
-		this.appendHeader();
+		if (!isDeployed(this.sessionHost.config)) {
+			this.appendErrorLine(
+				"This agent is still forming — it stays in its birth session until it deploys. Type /deploy when it's ready.",
+			);
+			this.ui.requestRender();
+			return;
+		}
+		if (!(await this.swapToNewSession("new"))) return;
+		// Single source of truth for the reset+repaint (header + transcript). On an empty
+		// fresh session this reproduces today's header-only output.
+		this.renderCurrentSessionState();
 		this.chatContainer.addChild(new Text(theme.fg("dim", "✓ New session started."), 1, 0));
 		this.chatContainer.addChild(new Spacer(1));
 		this.ui.setFocus(this.editor);
@@ -772,6 +809,207 @@ export class InteractiveMode {
 	 */
 	private getRegisteredToolDefinition(_toolName: string): undefined {
 		return undefined;
+	}
+
+	// =========================================================================
+	// Resume-transcript render — 1-1 port of pi's (`@opsyhq/coding-agent`)
+	// session-render pipeline (`getUserMessageText`/`addMessageToChat`/
+	// `renderSessionContext`/`renderInitialMessages`/`renderCurrentSessionState`).
+	// The data layer is reused from the engine (`SessionHost.buildSessionContext`);
+	// only the TUI paint is ported here. Documented adaptations: steward has no
+	// SettingsManager (so `this.markdownTheme` replaces pi's
+	// `getMarkdownThemeWithSettings()`, and tool options pass `{}`), no footer
+	// (pi's `updateFooter` option is dropped), no project-trust warning, and no
+	// `session.retryAttempt` (the aborted tool stamp uses the plain text form).
+	// =========================================================================
+
+	/** Extract the plain-text portion of a user message (pi-verbatim). */
+	private getUserMessageText(message: Message): string {
+		if (message.role !== "user") return "";
+		const textBlocks =
+			typeof message.content === "string"
+				? [{ type: "text", text: message.content }]
+				: message.content.filter((c: { type: string }) => c.type === "text");
+		return textBlocks.map((c) => (c as { text: string }).text).join("");
+	}
+
+	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
+		switch (message.role) {
+			case "bashExecution": {
+				const component = new BashExecutionComponent(message.command, this.ui, message.excludeFromContext);
+				if (message.output) {
+					component.appendOutput(message.output);
+				}
+				component.setComplete(
+					message.exitCode,
+					message.cancelled,
+					message.truncated ? ({ truncated: true } as TruncationResult) : undefined,
+					message.fullOutputPath,
+				);
+				this.chatContainer.addChild(component);
+				break;
+			}
+			case "custom": {
+				if (message.display) {
+					const renderer = this.sessionHost.extensionRunner.getMessageRenderer(message.customType);
+					const component = new CustomMessageComponent(message, renderer, this.markdownTheme);
+					component.setExpanded(this.toolOutputExpanded);
+					this.chatContainer.addChild(component);
+				}
+				break;
+			}
+			case "compactionSummary": {
+				this.chatContainer.addChild(new Spacer(1));
+				const component = new CompactionSummaryMessageComponent(message, this.markdownTheme);
+				component.setExpanded(this.toolOutputExpanded);
+				this.chatContainer.addChild(component);
+				break;
+			}
+			case "branchSummary": {
+				this.chatContainer.addChild(new Spacer(1));
+				const component = new BranchSummaryMessageComponent(message, this.markdownTheme);
+				component.setExpanded(this.toolOutputExpanded);
+				this.chatContainer.addChild(component);
+				break;
+			}
+			case "user": {
+				const textContent = this.getUserMessageText(message);
+				if (textContent) {
+					if (this.chatContainer.children.length > 0) {
+						this.chatContainer.addChild(new Spacer(1));
+					}
+					const skillBlock = parseSkillBlock(textContent);
+					if (skillBlock) {
+						// Render skill block (collapsible)
+						const component = new SkillInvocationMessageComponent(skillBlock, this.markdownTheme);
+						component.setExpanded(this.toolOutputExpanded);
+						this.chatContainer.addChild(component);
+						// Render user message separately if present
+						if (skillBlock.userMessage) {
+							this.chatContainer.addChild(new Spacer(1));
+							const userComponent = new UserMessageComponent(skillBlock.userMessage, this.markdownTheme);
+							this.chatContainer.addChild(userComponent);
+						}
+					} else {
+						const userComponent = new UserMessageComponent(textContent, this.markdownTheme);
+						this.chatContainer.addChild(userComponent);
+					}
+					if (options?.populateHistory) {
+						this.editor.addToHistory?.(textContent);
+					}
+				}
+				break;
+			}
+			case "assistant": {
+				const assistantComponent = new AssistantMessageComponent(message, false, this.markdownTheme);
+				this.chatContainer.addChild(assistantComponent);
+				break;
+			}
+			case "toolResult": {
+				// Tool results are rendered inline with tool calls, handled separately
+				break;
+			}
+			default: {
+				const _exhaustive: never = message;
+			}
+		}
+	}
+
+	/**
+	 * Render session context to chat. Used for initial load and rebuild after compaction.
+	 * @param sessionContext Session context to render
+	 * @param options.populateHistory Add user messages to editor history
+	 */
+	private renderSessionContext(sessionContext: SessionContext, options: { populateHistory?: boolean } = {}): void {
+		this.pendingTools.clear();
+		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
+
+		for (const message of sessionContext.messages) {
+			// Assistant messages need special handling for tool calls
+			if (message.role === "assistant") {
+				this.addMessageToChat(message);
+				// Render tool call components
+				for (const content of message.content) {
+					if (content.type === "toolCall") {
+						const component = new ToolExecutionComponent(
+							content.name,
+							content.id,
+							content.arguments,
+							// Deviation from `@opsyhq/coding-agent`: no settings manager, so pass
+							// `{}` and take the component defaults (matches the live
+							// `tool_execution_start` path).
+							{},
+							this.getRegisteredToolDefinition(content.name),
+							this.ui,
+							this.sessionHost.getCwd(),
+						);
+						component.setExpanded(this.toolOutputExpanded);
+						this.chatContainer.addChild(component);
+
+						if (message.stopReason === "aborted" || message.stopReason === "error") {
+							// Deviation: pi enriches the aborted text with `session.retryAttempt`,
+							// a live-session counter steward does not track on a resumed branch,
+							// so the plain form is used.
+							const errorMessage =
+								message.stopReason === "aborted" ? "Operation aborted" : message.errorMessage || "Error";
+							component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
+						} else {
+							renderedPendingTools.set(content.id, component);
+						}
+					}
+				}
+			} else if (message.role === "toolResult") {
+				// Match tool results to pending tool components
+				const component = renderedPendingTools.get(message.toolCallId);
+				if (component) {
+					component.updateResult(message);
+					renderedPendingTools.delete(message.toolCallId);
+				}
+			} else {
+				// All other messages use standard rendering
+				this.addMessageToChat(message, options);
+			}
+		}
+
+		// In-flight tools with no persisted result stay pending (pi-faithful).
+		for (const [toolCallId, component] of renderedPendingTools) {
+			this.pendingTools.set(toolCallId, component);
+		}
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Paint the resumed transcript: the engine's flattened session context, then a
+	 * compaction-count notice if the session was compacted. On birth the context is
+	 * empty, so this renders nothing and the seeded opener is appended afterward.
+	 * Omits pi's project-trust warning (steward's home dir is always trusted).
+	 */
+	renderInitialMessages(): void {
+		const context = this.sessionHost.buildSessionContext();
+		this.renderSessionContext(context, { populateHistory: true });
+
+		// Show compaction info if session was compacted. pi routes this through
+		// `showStatus`; steward has no such helper, so append a dim line directly.
+		const compactionCount = this.sessionHost.getEntries().filter((e) => e.type === "compaction").length;
+		if (compactionCount > 0) {
+			const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
+			this.chatContainer.addChild(new Text(theme.fg("dim", `Session compacted ${times}`), 1, 0));
+			this.chatContainer.addChild(new Spacer(1));
+		}
+	}
+
+	/**
+	 * Reset the view and repaint from the current session (header + transcript). The
+	 * single source of truth for `/new`. Resets only the transient fields steward
+	 * has (pi additionally clears a pending-messages container, a compaction queue,
+	 * and a streaming message that steward does not model).
+	 */
+	private renderCurrentSessionState(): void {
+		this.chatContainer.clear();
+		this.streamingComponent = undefined;
+		this.pendingTools.clear();
+		this.appendHeader();
+		this.renderInitialMessages();
 	}
 
 	private appendUserMessage(text: string): void {

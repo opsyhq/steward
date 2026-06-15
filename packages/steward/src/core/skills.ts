@@ -67,6 +67,37 @@ function addIgnoreRules(ig: IgnoreMatcher, dir: string, rootDir: string): void {
 	}
 }
 
+// ============================================================================
+// Skill Block Parsing
+//
+// 1-1 port of pi's (`@opsyhq/coding-agent`) `core/agent-session.ts` skill-block
+// parser. steward has no `core/agent-session.ts`, so it lives here alongside
+// `loadSkills` — the only adaptation is the import path consumers use.
+// ============================================================================
+
+/** Parsed skill block from a user message */
+export interface ParsedSkillBlock {
+	name: string;
+	location: string;
+	content: string;
+	userMessage: string | undefined;
+}
+
+/**
+ * Parse a skill block from message text.
+ * Returns null if the text doesn't contain a skill block.
+ */
+export function parseSkillBlock(text: string): ParsedSkillBlock | null {
+	const match = text.match(/^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/);
+	if (!match) return null;
+	return {
+		name: match[1],
+		location: match[2],
+		content: match[3],
+		userMessage: match[4]?.trim() || undefined,
+	};
+}
+
 export interface SkillFrontmatter {
 	name?: string;
 	description?: string;

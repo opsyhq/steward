@@ -32,8 +32,10 @@ import {
 	type AgentHarness,
 	type AgentMessage,
 	type AgentTool,
+	buildSessionContext,
 	calculateContextTokens,
 	estimateContextTokens,
+	type SessionContext,
 	type SessionTreeEntry,
 	type ThinkingLevel,
 } from "@opsyhq/agent";
@@ -211,6 +213,20 @@ export class SessionHost {
 	}
 
 	/**
+	 * Flatten the current branch into a render-ready `SessionContext` (the aligned
+	 * messages the interactive mode paints on resume). Reuses the engine's own
+	 * `buildSessionContext` over steward's `SessionManager` adapter — `getBranch()`
+	 * is exactly the leaf→root `SessionTreeEntry[]` the helper consumes. Exposed on
+	 * the host for the same reason as `getEntries`: the harness keeps its `session`
+	 * private, so the interactive mode can't reach the engine's `Session.buildContext()`
+	 * directly. This synchronous adapter path is used instead.
+	 */
+	buildSessionContext(): SessionContext {
+		if (!this._sessionManager) throw new Error("SessionHost not started.");
+		return buildSessionContext(this._sessionManager.getBranch());
+	}
+
+	/**
 	 * Live slash-command metadata — extension + prompt + skill commands, read-only. Mirrors
 	 * the `getCommands` action wired into `runner.bindCore`, but that copy is a closure
 	 * inside `build()`, unreachable from the interactive mode — which needs the same list to
@@ -253,8 +269,23 @@ export class SessionHost {
 		return this.build(options.fresh ?? false);
 	}
 
-	/** Tear down the current session and build a fresh one (e.g. after deploy). */
-	async newSession(): Promise<AgentHarness> {
+	/**
+	 * Tear down the current session and build a fresh one (e.g. after deploy).
+	 *
+	 * Invariant: while an agent is forming (undeployed) it stays in its single birth
+	 * session — only the deploy flow may swap it to a fresh session. The deploy flow
+	 * flips `deployedAt` (via `deployAgent`) BEFORE calling this with `reason: "deploy"`,
+	 * so the on-disk config re-read below reads as deployed by the time we get here.
+	 * A `reason: "new"` swap (the in-process `/new`) against a still-forming config is
+	 * refused at this primitive. We key off the caller's explicit intent rather than a
+	 * bare `isDeployed` check so correctness does not silently couple to deploy's
+	 * flip-then-swap ordering — reordering deploy must not quietly re-open the `/new`
+	 * gate. A thrown `newSession()` degrades gracefully (the caller keeps the old harness).
+	 */
+	async newSession({ reason }: { reason: "deploy" | "new" }): Promise<AgentHarness> {
+		if (reason === "new" && !isDeployed(loadAgentConfig(this.options.name))) {
+			throw new Error("This agent is still forming — it stays in its birth session until it deploys.");
+		}
 		return this.build(true);
 	}
 
