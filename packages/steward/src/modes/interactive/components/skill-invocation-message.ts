@@ -1,7 +1,3 @@
-// 1-1 port of pi's (`@opsyhq/coding-agent`) same-named component. The only
-// adaptation: `ParsedSkillBlock` is imported from steward's `core/skills.ts`
-// (where the ported `parseSkillBlock` lives) rather than pi's
-// `core/agent-session.ts`.
 import { Box, Markdown, type MarkdownTheme, Text } from "@opsyhq/tui";
 import type { ParsedSkillBlock } from "../../../core/skills.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";

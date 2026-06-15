@@ -69,10 +69,6 @@ function addIgnoreRules(ig: IgnoreMatcher, dir: string, rootDir: string): void {
 
 // ============================================================================
 // Skill Block Parsing
-//
-// 1-1 port of pi's (`@opsyhq/coding-agent`) `core/agent-session.ts` skill-block
-// parser. steward has no `core/agent-session.ts`, so it lives here alongside
-// `loadSkills` — the only adaptation is the import path consumers use.
 // ============================================================================
 
 /** Parsed skill block from a user message */

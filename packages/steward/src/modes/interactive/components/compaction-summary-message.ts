@@ -1,7 +1,3 @@
-// 1-1 port of pi's (`@opsyhq/coding-agent`) same-named component. The only
-// adaptation: the message-type import points at `@opsyhq/agent` (the engine's
-// canonical message types, which back the reused `buildSessionContext`) rather
-// than pi's local `core/messages.ts`.
 import type { CompactionSummaryMessage } from "@opsyhq/agent";
 import { Box, Markdown, type MarkdownTheme, Spacer, Text } from "@opsyhq/tui";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";

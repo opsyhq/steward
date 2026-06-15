@@ -1,8 +1,3 @@
-// 1-1 port of pi's (`@opsyhq/coding-agent`) same-named component. The only
-// adaptation: the message-type import points at `@opsyhq/agent` (the engine's
-// canonical message types, which back the reused `buildSessionContext`) rather
-// than pi's local `core/messages.ts`. The `MessageRenderer` import path already
-// matches steward's layout.
 import type { TextContent } from "@earendil-works/pi-ai";
 import type { CustomMessage } from "@opsyhq/agent";
 import type { Component } from "@opsyhq/tui";

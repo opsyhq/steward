@@ -812,18 +812,15 @@ export class InteractiveMode {
 	}
 
 	// =========================================================================
-	// Resume-transcript render — 1-1 port of pi's (`@opsyhq/coding-agent`)
-	// session-render pipeline (`getUserMessageText`/`addMessageToChat`/
-	// `renderSessionContext`/`renderInitialMessages`/`renderCurrentSessionState`).
-	// The data layer is reused from the engine (`SessionHost.buildSessionContext`);
-	// only the TUI paint is ported here. Documented adaptations: steward has no
-	// SettingsManager (so `this.markdownTheme` replaces pi's
-	// `getMarkdownThemeWithSettings()`, and tool options pass `{}`), no footer
-	// (pi's `updateFooter` option is dropped), no project-trust warning, and no
-	// `session.retryAttempt` (the aborted tool stamp uses the plain text form).
+	// Resume-transcript render. Repaints a resumed session into the chat view:
+	// `getUserMessageText`/`addMessageToChat`/`renderSessionContext`/
+	// `renderInitialMessages`/`renderCurrentSessionState`. The data layer comes
+	// from the engine (`SessionHost.buildSessionContext`); this only owns the TUI
+	// paint, using `this.markdownTheme` for markdown and the plain text form for
+	// the aborted-tool stamp.
 	// =========================================================================
 
-	/** Extract the plain-text portion of a user message (pi-verbatim). */
+	/** Extract the plain-text portion of a user message. */
 	private getUserMessageText(message: Message): string {
 		if (message.role !== "user") return "";
 		const textBlocks =
@@ -935,9 +932,8 @@ export class InteractiveMode {
 							content.name,
 							content.id,
 							content.arguments,
-							// Deviation from `@opsyhq/coding-agent`: no settings manager, so pass
-							// `{}` and take the component defaults (matches the live
-							// `tool_execution_start` path).
+							// No settings manager, so pass `{}` and take the component defaults
+							// (matches the live `tool_execution_start` path).
 							{},
 							this.getRegisteredToolDefinition(content.name),
 							this.ui,
@@ -947,9 +943,8 @@ export class InteractiveMode {
 						this.chatContainer.addChild(component);
 
 						if (message.stopReason === "aborted" || message.stopReason === "error") {
-							// Deviation: pi enriches the aborted text with `session.retryAttempt`,
-							// a live-session counter steward does not track on a resumed branch,
-							// so the plain form is used.
+							// A resumed branch has no live retry counter, so use the plain
+							// aborted/error text.
 							const errorMessage =
 								message.stopReason === "aborted" ? "Operation aborted" : message.errorMessage || "Error";
 							component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
@@ -971,7 +966,7 @@ export class InteractiveMode {
 			}
 		}
 
-		// In-flight tools with no persisted result stay pending (pi-faithful).
+		// In-flight tools with no persisted result stay pending.
 		for (const [toolCallId, component] of renderedPendingTools) {
 			this.pendingTools.set(toolCallId, component);
 		}
@@ -982,14 +977,12 @@ export class InteractiveMode {
 	 * Paint the resumed transcript: the engine's flattened session context, then a
 	 * compaction-count notice if the session was compacted. On birth the context is
 	 * empty, so this renders nothing and the seeded opener is appended afterward.
-	 * Omits pi's project-trust warning (steward's home dir is always trusted).
 	 */
 	renderInitialMessages(): void {
 		const context = this.sessionHost.buildSessionContext();
 		this.renderSessionContext(context, { populateHistory: true });
 
-		// Show compaction info if session was compacted. pi routes this through
-		// `showStatus`; steward has no such helper, so append a dim line directly.
+		// Show compaction info if session was compacted: append a dim line directly.
 		const compactionCount = this.sessionHost.getEntries().filter((e) => e.type === "compaction").length;
 		if (compactionCount > 0) {
 			const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
@@ -1000,9 +993,8 @@ export class InteractiveMode {
 
 	/**
 	 * Reset the view and repaint from the current session (header + transcript). The
-	 * single source of truth for `/new`. Resets only the transient fields steward
-	 * has (pi additionally clears a pending-messages container, a compaction queue,
-	 * and a streaming message that steward does not model).
+	 * single source of truth for `/new`. Resets the transient per-session fields
+	 * (streaming component, pending tools) before repainting.
 	 */
 	private renderCurrentSessionState(): void {
 		this.chatContainer.clear();
