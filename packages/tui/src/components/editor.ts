@@ -1502,6 +1502,13 @@ export class Editor implements Component, Focusable {
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
+
+		// Re-query an open picker so it closes (or narrows) against the new text,
+		// matching handleBackspace. Without this, deleting back to an empty or
+		// no-longer-matching context leaves the picker open until the next keystroke.
+		if (this.autocompleteState) {
+			this.updateAutocomplete();
+		}
 	}
 
 	private deleteToEndOfLine(): void {
@@ -1533,6 +1540,12 @@ export class Editor implements Component, Focusable {
 
 		if (this.onChange) {
 			this.onChange(this.getText());
+		}
+
+		// Re-query an open picker so it closes (or narrows) against the new text,
+		// matching handleForwardDelete.
+		if (this.autocompleteState) {
+			this.updateAutocomplete();
 		}
 	}
 
@@ -1579,6 +1592,12 @@ export class Editor implements Component, Focusable {
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
+
+		// Re-query an open picker so it closes (or narrows) against the new text,
+		// matching handleBackspace.
+		if (this.autocompleteState) {
+			this.updateAutocomplete();
+		}
 	}
 
 	private deleteWordForward(): void {
@@ -1620,6 +1639,12 @@ export class Editor implements Component, Focusable {
 
 		if (this.onChange) {
 			this.onChange(this.getText());
+		}
+
+		// Re-query an open picker so it closes (or narrows) against the new text,
+		// matching handleForwardDelete.
+		if (this.autocompleteState) {
+			this.updateAutocomplete();
 		}
 	}
 

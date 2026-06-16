@@ -2476,6 +2476,49 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.isShowingAutocomplete(), false);
 		});
 
+		it("closes slash menu after deleting to empty, for every delete path", async () => {
+			const slashProvider: AutocompleteProvider = {
+				getSuggestions: async (lines, _cursorLine, cursorCol) => {
+					const prefix = (lines[0] || "").slice(0, cursorCol);
+					if (!prefix.startsWith("/")) return null;
+					const commands = [
+						{ value: "/model", label: "model" },
+						{ value: "/help", label: "help" },
+					];
+					const filtered = commands.filter((c) => c.value.startsWith(prefix));
+					return filtered.length > 0 ? { items: filtered, prefix } : null;
+				},
+				applyCompletion,
+			};
+
+			// Every delete path that empties the line must re-query and close the
+			// picker, not just backspace. "\x7f" backspace, "\x15" ctrl+u
+			// (delete-to-line-start, what cmd+delete sends), "\x17" ctrl+w
+			// (delete-word-backward). The close flows through the same async
+			// re-query backspace uses, so flush before asserting.
+			for (const deleteKey of ["\x7f", "\x15", "\x17"]) {
+				const editor = new Editor(createTestTUI(), defaultEditorTheme);
+				editor.setAutocompleteProvider(slashProvider);
+
+				editor.handleInput("/");
+				await flushAutocomplete();
+				assert.strictEqual(
+					editor.isShowingAutocomplete(),
+					true,
+					`setup: menu open before ${JSON.stringify(deleteKey)}`,
+				);
+
+				editor.handleInput(deleteKey);
+				await flushAutocomplete();
+				assert.strictEqual(editor.getText(), "", `${JSON.stringify(deleteKey)} should empty the line`);
+				assert.strictEqual(
+					editor.isShowingAutocomplete(),
+					false,
+					`${JSON.stringify(deleteKey)} should close the picker`,
+				);
+			}
+		});
+
 		it("applies exact typed slash-argument value on Enter even when first item is highlighted", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 
