@@ -1,7 +1,5 @@
 /**
  * Serialize file mutation operations targeting the same file.
- *
- * Copied 1-1 from `@opsyhq/coding-agent`'s core/tools/file-mutation-queue.ts.
  */
 
 import { realpath } from "node:fs/promises";

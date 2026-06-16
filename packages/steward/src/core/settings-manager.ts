@@ -3,9 +3,8 @@ import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
-// Substrate-forced divergence: steward renamed pi's zero-arg getAgentDir() to a
-// per-agent getAgentDir(name); the shared (singular `agent/`) credential dir pi
-// used is getSharedAgentDir(). Alias keeps the `getAgentDir()` default below byte-identical.
+// Alias the shared (singular `agent/`) credential dir as getAgentDir() for the
+// default below.
 import { CONFIG_DIR_NAME, getSharedAgentDir as getAgentDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";

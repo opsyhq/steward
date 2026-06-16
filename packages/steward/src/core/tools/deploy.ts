@@ -1,7 +1,7 @@
 /**
  * The `deploy` tool — the agent's way of declaring it's ready to be deployed.
  *
- * Net-new for steward: pi/coding-agent have no lifecycle.
+ * Net-new for steward.
  *
  * The tool authors the agent's identity — it distills and writes its own
  * `purpose` (into agent.json) and its final SOUL.md. We trust the agent to know

@@ -321,11 +321,6 @@ function resolveThemeColors<T extends Record<string, ColorValue>>(
 export class Theme {
 	readonly name?: string;
 	readonly sourcePath?: string;
-	// Deviation from `@opsyhq/coding-agent`: pi's Theme also carries a
-	// `sourceInfo?: SourceInfo` field (plus matching constructor option/assignment
-	// and a `SourceInfo` import). That plumbing only feeds pi's
-	// package-manager/source-info machinery (extensions, skills, slash-commands,
-	// resource-loader), none of which steward has, so it is dropped here.
 	private fgColors: Map<ThemeColor, string>;
 	private bgColors: Map<ThemeBg, string>;
 	private mode: ColorMode;

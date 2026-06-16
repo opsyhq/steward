@@ -1,9 +1,8 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import ignore from "ignore";
 import { basename, dirname, join, relative, resolve, sep } from "path";
-// Substrate-forced divergence: steward's getAgentDir takes an agent name; pi's
-// shared agent dir is getSharedAgentDir(). Alias keeps the zero-arg `getAgentDir()`
-// fallback in loadSkills() byte-identical to pi.
+// Alias the shared (zero-arg) agent dir as getAgentDir() for the fallback in
+// loadSkills().
 import { CONFIG_DIR_NAME, getSharedAgentDir as getAgentDir } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";

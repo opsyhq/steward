@@ -1,8 +1,7 @@
 /**
  * Single-shot print mode.
  *
- * Mirrors `@opsyhq/coding-agent`'s modes/print-mode.ts — `runPrintMode(host,
- * options): Promise<number>` where `host` is the harness. Simpler here because
+ * `runPrintMode(host, options): Promise<number>` where `host` is the harness.
  * `AgentHarness.prompt()` resolves with the final `AssistantMessage` directly,
  * so there are no streaming extensions/output guards to manage.
  */
@@ -10,11 +9,11 @@
 import type { AgentHarness } from "@opsyhq/agent";
 import { collectText, isFailureMessage } from "./message.ts";
 
-export interface RunPrintModeOptions {
+export interface PrintModeOptions {
 	message: string;
 }
 
-export async function runPrintMode(host: AgentHarness, options: RunPrintModeOptions): Promise<number> {
+export async function runPrintMode(host: AgentHarness, options: PrintModeOptions): Promise<number> {
 	const response = await host.prompt(options.message);
 	const text = collectText(response);
 

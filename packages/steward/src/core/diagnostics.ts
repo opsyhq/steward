@@ -13,3 +13,12 @@ export interface ResourceDiagnostic {
 	path?: string;
 	collision?: ResourceCollision;
 }
+
+/** Loaded-resource counts plus any diagnostics, surfaced at startup and after `/reload`. */
+export interface ResourceSummary {
+	extensions: number;
+	skills: number;
+	prompts: number;
+	commands: number;
+	diagnostics: ResourceDiagnostic[];
+}

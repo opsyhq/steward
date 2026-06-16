@@ -2,13 +2,11 @@
  * Credential storage for API keys and OAuth tokens.
  * Handles loading, saving, and refreshing credentials from auth.json.
  *
- * Uses file locking to prevent race conditions when multiple pi instances
+ * Uses file locking to prevent race conditions when multiple instances
  * try to refresh tokens simultaneously.
  *
- * Faithful copy of `@opsyhq/coding-agent`'s core/auth-storage.ts. The only
- * adaptation: the on-disk path comes from steward's `getAuthPath()` (the shared
- * `~/.steward/agent/auth.json` the pi CLI already wrote), so steward reuses the
- * same credentials with no re-login.
+ * The on-disk path comes from `getAuthPath()` (the shared
+ * `~/.steward/agent/auth.json`).
  */
 
 import {
@@ -409,7 +407,7 @@ export class AuthStorage {
 
 	/**
 	 * Refresh OAuth token with backend locking to prevent race conditions.
-	 * Multiple pi instances may try to refresh simultaneously when tokens expire.
+	 * Multiple instances may try to refresh simultaneously when tokens expire.
 	 */
 	private async refreshOAuthTokenWithLock(
 		providerId: OAuthProviderId,

@@ -5,15 +5,15 @@
  * snapshot of curated memory (read once at session start — see core/memory.ts).
  */
 
+import { APP_NAME, getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
 import type { AgentConfig } from "./agent-config.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 
 export interface BuildSystemPromptOptions {
-	// Substrate-forced (wiring): `config` is optional and `cwd` was added so the
-	// vendored extension runner can build its `{ cwd }`-shaped placeholder options
-	// (`runner.ts:281,342`). Steward always supplies `config` at the real call site.
+	// `config` is optional and `cwd` exists so the extension runner can build its
+	// `{ cwd }`-shaped placeholder options. The real call site always supplies `config`.
 	config?: AgentConfig;
-	/** Working directory (consumed by the vendored runner's default options builder). */
+	/** Working directory (consumed by the runner's default options builder). */
 	cwd?: string;
 	/** Frozen SOUL.md snapshot. Empty string when absent. */
 	soul?: string;
@@ -23,6 +23,10 @@ export interface BuildSystemPromptOptions {
 	user?: string;
 	/** Skills discovered for this agent, formatted into the frozen prompt. */
 	skills?: Skill[];
+	/** Names of the tools active this session, so extensions can tailor guidance. */
+	selectedTools?: string[];
+	/** Text appended to the end of the system prompt. */
+	appendSystemPrompt?: string;
 }
 
 const BIRTH_INSTRUCTION = [
@@ -45,8 +49,8 @@ function section(title: string, content: string): string {
 
 export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const { config } = options;
-	// The vendored extension runner constructs a `{ cwd }`-only placeholder (no config);
-	// steward always passes config at the real call site, so this guard only covers that path.
+	// The extension runner constructs a `{ cwd }`-only placeholder (no config); the real
+	// call site always passes config, so this guard only covers that path.
 	if (!config) return "";
 	const purpose = config.purpose.trim() || "(no purpose recorded)";
 
@@ -75,11 +79,32 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		parts.push("", BIRTH_INSTRUCTION);
 	}
 
+	// Docs-guidance block: point the agent at the packaged README/docs/examples so it
+	// reads them before authoring extensions/skills/prompt-templates/themes for itself.
+	const readmePath = getReadmePath();
+	const docsPath = getDocsPath();
+	const examplesPath = getExamplesPath();
+	parts.push(
+		"",
+		`## ${APP_NAME} documentation (read only when the user asks about ${APP_NAME} itself, its extensions, themes, skills, or prompt templates)`,
+		`- Main documentation: ${readmePath}`,
+		`- Additional docs: ${docsPath}`,
+		`- Examples: ${examplesPath} (extensions, custom tools, SDK)`,
+		`- When reading ${APP_NAME} docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory`,
+		`- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md)`,
+		`- When working on ${APP_NAME} topics, read the docs and examples, and follow .md cross-references before implementing`,
+		`- Always read ${APP_NAME} .md files completely and follow links to related docs`,
+	);
+
 	// Skills are appended to the frozen prompt. formatSkillsForPrompt
 	// returns "" when there are no model-invocable skills, leaving the prompt unchanged.
 	const skillsText = formatSkillsForPrompt(options.skills ?? []);
 	if (skillsText) {
 		parts.push(skillsText);
+	}
+
+	if (options.appendSystemPrompt) {
+		parts.push("", options.appendSystemPrompt);
 	}
 
 	return parts.join("\n");

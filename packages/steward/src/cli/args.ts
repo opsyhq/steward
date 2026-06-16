@@ -1,7 +1,7 @@
 /**
  * CLI argument parsing and help display.
  *
- * Hand-rolled (no library), mirroring `@opsyhq/coding-agent`'s cli/args.ts.
+ * Hand-rolled argument parsing (no library).
  * Positionals carry the subcommand / agent name and any inline message.
  */
 

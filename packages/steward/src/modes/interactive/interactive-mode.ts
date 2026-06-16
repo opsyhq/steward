@@ -23,12 +23,16 @@ import {
 import {
 	type AutocompleteProvider,
 	CombinedAutocompleteProvider,
+	type Component,
 	Container,
 	Editor,
+	type EditorComponent,
 	getKeybindings,
 	Loader,
 	type MarkdownTheme,
 	matchesKey,
+	type OverlayHandle,
+	type OverlayOptions,
 	ProcessTerminal,
 	type SlashCommand,
 	Spacer,
@@ -38,8 +42,21 @@ import {
 } from "@opsyhq/tui";
 import { deployAgent, isDeployed } from "../../core/agent-config.ts";
 import { executeBashWithOperations } from "../../core/bash-executor.ts";
-import type { AutocompleteProviderFactory } from "../../core/extensions/index.ts";
-import { KeybindingsManager } from "../../core/keybindings.ts";
+import type { ResourceDiagnostic } from "../../core/diagnostics.ts";
+import type { AutocompleteProviderFactory, ExtensionRunner } from "../../core/extensions/index.ts";
+import type {
+	EditorFactory,
+	ExtensionCommandContextActions,
+	ExtensionShortcut,
+	ExtensionUIContext,
+	ExtensionUIDialogOptions,
+	ExtensionWidgetOptions,
+	TerminalInputHandler,
+	WorkingIndicatorOptions,
+} from "../../core/extensions/types.ts";
+import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
+import { KeybindingsManager, type KeyId } from "../../core/keybindings.ts";
+import { createBashExecutionMessage } from "../../core/messages.ts";
 import type { SessionHost } from "../../core/session-host.ts";
 import { parseSkillBlock } from "../../core/skills.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
@@ -53,15 +70,36 @@ import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import { CustomMessageComponent } from "./components/custom-message.ts";
+import { ExtensionEditorComponent } from "./components/extension-editor.ts";
+import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { rawKeyHint } from "./components/keybinding-hints.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
-import { getEditorTheme, getMarkdownTheme, initTheme, theme } from "./theme/theme.ts";
+import {
+	getAvailableThemesWithPaths,
+	getEditorTheme,
+	getMarkdownTheme,
+	getThemeByName,
+	initTheme,
+	setTheme,
+	setThemeInstance,
+	Theme,
+	theme,
+} from "./theme/theme.ts";
 
 /** Window (ms) within which a second Ctrl+C quits instead of clearing the editor. */
 const CTRL_C_EXIT_WINDOW_MS = 500;
+
+/** Default streaming loader message, restored when an extension clears its override. */
+const DEFAULT_WORKING_MESSAGE = "Working...";
+
+/** Default label for collapsed thinking blocks, restored when an extension clears its override. */
+const DEFAULT_HIDDEN_THINKING_LABEL = "Thinking...";
+
+/** Cap on total widget lines so an extension widget can't push the editor off-screen. */
+const MAX_WIDGET_LINES = 10;
 
 /**
  * Sent to the agent when the human types `/deploy` — it nudges the agent to call the
@@ -74,9 +112,9 @@ const DEPLOY_INSTRUCTION =
 
 /**
  * Constructor opts decided by the CLI/main layer and read in the startup method.
- * Whereas pi's `initialMessage` seeds a *user* prompt and runs a turn, a newly born
- * agent opens the chat itself, so `initialAssistantMessage` is seeded as an *assistant*
- * turn with no model round-trip. The text is decided at the top (`main.ts`), not here.
+ * A newly born agent opens the chat itself, so `initialAssistantMessage` is seeded as
+ * an *assistant* turn with no model round-trip. The text is decided at the top
+ * (`main.ts`), not here.
  */
 export interface InteractiveModeOptions {
 	/**
@@ -106,9 +144,45 @@ export class InteractiveMode {
 	private readonly chatContainer: Container;
 	private readonly statusContainer: Container;
 	private readonly editorContainer: Container;
-	private readonly editor: Editor;
+	private readonly keybindings: KeybindingsManager;
+	// The active input editor. Defaults to `defaultEditor` and is swapped when an extension
+	// supplies one via `ctx.ui.setEditorComponent` (restored to the default on undefined).
+	private editor: EditorComponent;
+	private readonly defaultEditor: Editor;
 	private readonly loader: Loader;
 	private readonly markdownTheme: MarkdownTheme;
+	// Extension UI chrome. The header/footer containers hold extension-supplied components
+	// (empty otherwise — steward has no built-in header/footer rows); the widget containers
+	// frame the editor above and below. `footerDataProvider` backs custom footers and the
+	// `setStatus`/git-branch data they read.
+	private readonly headerContainer: Container;
+	private readonly widgetContainerAbove: Container;
+	private readonly widgetContainerBelow: Container;
+	private readonly footerContainer: Container;
+	private readonly footerDataProvider: FooterDataProvider;
+	// Extension dialogs swapped into editorContainer (like the deploy selector), the widgets
+	// rendered around the editor, and the custom header/footer currently installed.
+	private extensionInput?: ExtensionInputComponent;
+	private extensionEditor?: ExtensionEditorComponent;
+	private readonly extensionWidgetsAbove = new Map<string, Component & { dispose?(): void }>();
+	private readonly extensionWidgetsBelow = new Map<string, Component & { dispose?(): void }>();
+	private customFooter?: Component & { dispose?(): void };
+	private customHeader?: Component & { dispose?(): void };
+	// Extension keyboard shortcuts, matched in handleGlobalInput; terminal-input listeners,
+	// tracked so reload can drop them; the custom editor factory and last composed provider.
+	private extensionShortcuts = new Map<KeyId, ExtensionShortcut>();
+	private readonly extensionTerminalInputUnsubscribers = new Set<() => void>();
+	private editorComponentFactory?: EditorFactory;
+	private autocompleteProvider?: AutocompleteProvider;
+	// Streaming working-indicator state, configurable by extensions via ctx.ui.
+	private workingMessage?: string;
+	private workingVisible = true;
+	private workingIndicatorOptions?: WorkingIndicatorOptions;
+	private hiddenThinkingLabel = DEFAULT_HIDDEN_THINKING_LABEL;
+	// The last status line + its leading spacer, reused so repeated `showStatus` calls
+	// update in place instead of stacking identical lines.
+	private lastStatusText?: Text;
+	private lastStatusSpacer?: Spacer;
 
 	private unsubscribe?: () => void;
 	private removeInputListener?: () => void;
@@ -140,16 +214,12 @@ export class InteractiveMode {
 	// Editor autocomplete (the slash-command menu). The engine —
 	// `CombinedAutocompleteProvider` plus the SelectList dropdown — lives in
 	// `@opsyhq/tui`; this layer only builds the provider from the live command set and
-	// pushes it into the editor. `autocompleteProviderWrappers` is the extension-stacking
-	// hook: always empty in steward, which has no interactive `ExtensionUIContext` bridge
-	// yet (extensions get the runner's noOpUIContext, so `ctx.addAutocompleteProvider` can
-	// never fire). `fdPath` is resolved lazily (initAutocompleteFd) and only powers
-	// `@`-fuzzy file search; slash-command and directory (readdir) completion work without
-	// it. (Divergence: pi also retains the composed provider in a field to re-push onto
-	// editors it swaps in at runtime; steward has one fixed editor and never swaps, so
-	// there is no reader and nothing to retain.)
-	private readonly autocompleteProviderWrappers: AutocompleteProviderFactory[] = [];
-	private fdPath: string | null = null;
+	// pushes it into the editor. `autocompleteProviderWrappers` holds extension-supplied
+	// wrappers (via `ctx.ui.addAutocompleteProvider`), stacked over the base provider.
+	// `fdPath` is resolved lazily (initAutocompleteFd) and only powers `@`-fuzzy file
+	// search; slash-command and directory (readdir) completion work without it.
+	private autocompleteProviderWrappers: AutocompleteProviderFactory[] = [];
+	private fdPath: string | undefined;
 
 	constructor(host: SessionHost, options: InteractiveModeOptions = {}) {
 		this.sessionHost = host;
@@ -157,13 +227,20 @@ export class InteractiveMode {
 		// The theme proxy and keybinding hints used by the tool renderers throw
 		// unless initialized first; do it before any styling runs.
 		initTheme();
-		setKeybindings(KeybindingsManager.create());
+		this.keybindings = KeybindingsManager.create();
+		setKeybindings(this.keybindings);
 		this.ui = new TUI(new ProcessTerminal());
 		this.chatContainer = new Container();
 		this.statusContainer = new Container();
 		this.editorContainer = new Container();
+		this.headerContainer = new Container();
+		this.widgetContainerAbove = new Container();
+		this.widgetContainerBelow = new Container();
+		this.footerContainer = new Container();
+		this.footerDataProvider = new FooterDataProvider(this.sessionHost.getCwd());
 		this.markdownTheme = getMarkdownTheme();
-		this.editor = new Editor(this.ui, getEditorTheme(), { paddingX: 1 });
+		this.defaultEditor = new Editor(this.ui, getEditorTheme(), { paddingX: 1 });
+		this.editor = this.defaultEditor;
 		this.loader = new Loader(
 			this.ui,
 			(text) => theme.fg("accent", text),
@@ -197,14 +274,29 @@ export class InteractiveMode {
 		this.setupAutocompleteProvider();
 		void this.initAutocompleteFd();
 		this.subscribeToHost();
+		// Hand the host this mode's extension surface so it (and every runner the host
+		// rebuilds on session swap / reload) can drive interactive UI and session control.
+		this.sessionHost.bindInteractiveContext({
+			uiContext: this.createExtensionUIContext(),
+			mode: "tui",
+			commandContextActions: this.createCommandContextActions(),
+			onError: (error) => this.showExtensionError(error.extensionPath, error.error, error.stack),
+			shutdownHandler: () => this.stop(),
+		});
+		this.setupExtensionShortcuts(this.sessionHost.extensionRunner);
 		this.removeInputListener = this.ui.addInputListener((data) => this.handleGlobalInput(data));
 
+		this.ui.addChild(this.headerContainer);
 		this.ui.addChild(this.chatContainer);
+		this.ui.addChild(this.widgetContainerAbove);
 		this.ui.addChild(this.statusContainer);
 		this.ui.addChild(this.editorContainer);
+		this.ui.addChild(this.widgetContainerBelow);
+		this.ui.addChild(this.footerContainer);
 		this.editorContainer.addChild(this.editor);
 
 		this.appendHeader();
+		this.showResourceSummary();
 
 		this.ui.setFocus(this.editor);
 		this.ui.start();
@@ -230,14 +322,9 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Build the base autocomplete provider from the live command set. Substrate
-	 * divergences:
-	 *   - pi reads three separate session accessors (promptTemplates, extension commands,
-	 *     skills); steward's harness session is private, but `SessionHost.getCommands()`
-	 *     already merges exactly those three into `SlashCommandInfo[]`, so pi's three
-	 *     branches collapse into one loop here.
-	 *   - pi attaches a dynamic `getArgumentCompletions` to the `model` builtin; steward has
-	 *     no `/model` interactive command, so there is nothing to attach it to.
+	 * Build the base autocomplete provider from the live command set.
+	 * `SessionHost.getCommands()` merges prompt templates, extension commands, and skills
+	 * into a single `SlashCommandInfo[]`, so a single loop here covers all of them.
 	 */
 	private createBaseAutocompleteProvider(): AutocompleteProvider {
 		const slashCommands: SlashCommand[] = BUILTIN_SLASH_COMMANDS.map((command) => ({
@@ -263,10 +350,8 @@ export class InteractiveMode {
 
 	/**
 	 * Compose the base provider with any extension wrapper factories and push it into the
-	 * editor. Collapsed to steward's single editor (pi sets the provider on both
-	 * `defaultEditor` and a swappable `editor`). The wrapper loop never runs, since
-	 * `autocompleteProviderWrappers` is always empty in steward (no interactive
-	 * `ExtensionUIContext` bridge — see the field comment).
+	 * active editor. The composed provider is retained so a custom editor swapped in later
+	 * (via `setEditorComponent`) can be seeded with it.
 	 */
 	private setupAutocompleteProvider(): void {
 		let provider = this.createBaseAutocompleteProvider();
@@ -279,15 +364,15 @@ export class InteractiveMode {
 			provider.triggerCharacters = [...new Set(triggerCharacters)];
 		}
 
-		this.editor.setAutocompleteProvider(provider);
+		this.autocompleteProvider = provider;
+		this.editor.setAutocompleteProvider?.(provider);
 	}
 
 	/**
 	 * Resolve the `fd` binary in the background, then rebuild the provider so `@`-fuzzy file
-	 * search lights up. Substrate divergence: pi resolves `fd` in an async startup method
-	 * before its first `setupAutocompleteProvider`; steward builds the editor and calls setup
-	 * synchronously in `run()` (slash-command and directory completion need no fd), then
-	 * rebuilds the provider here once fd lands.
+	 * search lights up. The editor is built and the provider set up synchronously in `run()`
+	 * (slash-command and directory completion need no fd); this rebuilds the provider once
+	 * fd lands.
 	 */
 	private async initAutocompleteFd(): Promise<void> {
 		try {
@@ -301,10 +386,8 @@ export class InteractiveMode {
 
 	/**
 	 * Build the `[source]` tag prefixed onto extension/prompt/skill command descriptions in
-	 * the autocomplete menu. Omits pi's git-URL branch: pi formats git sources via
-	 * `parseGitUrl` (utils/git.ts), which steward does not vendor — so git sources fall
-	 * through to the bare scope prefix, exactly pi's own behavior when `parseGitUrl` returns
-	 * null.
+	 * the autocomplete menu. There is no git-URL formatting, so git sources fall through to
+	 * the bare scope prefix.
 	 */
 	private getAutocompleteSourceTag(sourceInfo?: SourceInfo): string | undefined {
 		if (!sourceInfo) {
@@ -342,7 +425,12 @@ export class InteractiveMode {
 	private async seedInitialAssistantMessage(text: string): Promise<void> {
 		try {
 			const message = await this.sessionHost.seedAssistantMessage(text);
-			const component = new AssistantMessageComponent(undefined, false, this.markdownTheme);
+			const component = new AssistantMessageComponent(
+				undefined,
+				false,
+				this.markdownTheme,
+				this.hiddenThinkingLabel,
+			);
 			component.updateContent(message);
 			this.chatContainer.addChild(component);
 			this.chatContainer.addChild(new Spacer(1));
@@ -379,15 +467,42 @@ export class InteractiveMode {
 		if (!isDeployed(config)) {
 			lines.push(theme.fg("dim", "Forming — it'll ask to deploy when ready, or type /deploy."));
 		}
-		// Bash key hints, joined with a compact " · " separator. Deviation: pi carries
-		// these in its `ExpandableText` startup header; steward's header is a reduced
-		// plain-text form, so the hints live here instead.
+		// Bash key hints, joined with a compact " · " separator. The header is a reduced
+		// plain-text form, so the hints live here.
 		lines.push(
 			[rawKeyHint("!", "to run bash"), rawKeyHint("!!", "to run bash (no context)")].join(theme.fg("muted", " · ")),
 		);
 		lines.push(theme.fg("dim", "Ctrl+C to exit."));
 		this.chatContainer.addChild(new Text(lines.join("\n"), 1, 0));
 		this.chatContainer.addChild(new Spacer(1));
+	}
+
+	/** Print the loaded-resource count line plus any load/collision diagnostics. */
+	private showResourceSummary(): void {
+		const summary = this.sessionHost.getResourceSummary();
+		const parts: string[] = [];
+		if (summary.extensions > 0) parts.push(`${summary.extensions} extension${summary.extensions === 1 ? "" : "s"}`);
+		if (summary.skills > 0) parts.push(`${summary.skills} skill${summary.skills === 1 ? "" : "s"}`);
+		if (summary.prompts > 0) parts.push(`${summary.prompts} prompt${summary.prompts === 1 ? "" : "s"}`);
+		if (summary.commands > 0) parts.push(`${summary.commands} command${summary.commands === 1 ? "" : "s"}`);
+		if (parts.length > 0) {
+			this.chatContainer.addChild(new Text(theme.fg("dim", `Loaded ${parts.join(", ")}.`), 1, 0));
+			this.chatContainer.addChild(new Spacer(1));
+		}
+		this.appendResourceDiagnostics(summary.diagnostics);
+	}
+
+	private appendResourceDiagnostics(diagnostics: ResourceDiagnostic[]): void {
+		if (diagnostics.length === 0) return;
+		for (const diagnostic of diagnostics) {
+			const label = diagnostic.type === "error" ? "error" : diagnostic.type === "collision" ? "conflict" : "warning";
+			const where = diagnostic.path ? theme.fg("muted", ` (${diagnostic.path})`) : "";
+			this.chatContainer.addChild(
+				new Text(`${theme.fg("warning", `! [${label}] ${diagnostic.message}`)}${where}`, 1, 0),
+			);
+		}
+		this.chatContainer.addChild(new Spacer(1));
+		this.ui.requestRender();
 	}
 
 	private async handleSubmit(text: string): Promise<void> {
@@ -415,8 +530,14 @@ export class InteractiveMode {
 			await this.handleCompactCommand(customInstructions);
 			return;
 		}
-		// `/quit` — exit. `stop()` is the native equivalent of pi's `shutdown()`
-		// (resolveExit + main.cleanup own the rest). See its divergences.
+		// `/reload` — rebuild extensions, skills, prompts, and keybindings in place.
+		if (trimmed === "/reload") {
+			this.editor.setText("");
+			await this.handleReloadCommand();
+			return;
+		}
+		// `/quit` — exit. `stop()` triggers graceful shutdown (resolveExit + main.cleanup
+		// own the rest).
 		if (trimmed === "/quit") {
 			this.editor.setText("");
 			this.stop();
@@ -428,17 +549,15 @@ export class InteractiveMode {
 			const isExcluded = text.startsWith("!!");
 			const command = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
 			if (command) {
-				// Deviation from `@opsyhq/coding-agent`: pi guards with `session.isBashRunning`
-				// (and defers to a `pendingMessagesContainer` while streaming) and warns via
-				// `showWarning`. Steward has neither, so it guards on the live AbortController
-				// and warns via `appendErrorLine`; the hint names Ctrl+C (steward's interrupt).
+				// Guard on the live AbortController so only one bash command runs at a time,
+				// and warn via `appendErrorLine`; the hint names Ctrl+C (the interrupt key).
 				if (this.bashAbortController) {
 					this.appendErrorLine("A bash command is already running. Press Ctrl+C to cancel it first.");
 					this.editor.setText(text);
 					this.ui.requestRender();
 					return;
 				}
-				// Deviation: pi's editor auto-clears on submit; steward's does not, so clear it.
+				// The editor does not auto-clear on submit, so clear it.
 				this.editor.setText("");
 				this.editor.addToHistory?.(text);
 				await this.handleBashCommand(command, isExcluded);
@@ -453,7 +572,7 @@ export class InteractiveMode {
 		this.appendUserMessage(trimmed);
 		this.ui.requestRender();
 		try {
-			await this.harness.prompt(trimmed);
+			await this.sessionHost.prompt(trimmed);
 		} catch (error) {
 			if (error instanceof AgentHarnessError && error.code === "busy") return;
 			this.appendErrorLine(error instanceof Error ? error.message : String(error));
@@ -489,8 +608,7 @@ export class InteractiveMode {
 
 	/**
 	 * Called at agent_end when the deploy tool ran successfully. Always confirm with a
-	 * Yes/No dialog before deploying — symmetric with how `@opsyhq/coding-agent` confirms
-	 * any extension action: the tool finishes, the UI asks, the human decides.
+	 * Yes/No dialog before deploying: the tool finishes, the UI asks, the human decides.
 	 */
 	private async finalizeDeploy(): Promise<void> {
 		this.deployToolCallId = undefined;
@@ -526,16 +644,22 @@ export class InteractiveMode {
 	 */
 	private async swapToNewSession(reason: "deploy" | "new"): Promise<boolean> {
 		this.unsubscribe?.();
+		// Tear down the old session's extension chrome before the swap, so the new session's
+		// `session_start` (emitted inside newSession) paints onto a clean surface.
+		this.resetExtensionUI();
 		try {
 			// On success the host swaps in the new harness; on failure it keeps the old.
 			await this.sessionHost.newSession({ reason });
 		} catch (error) {
 			this.subscribeToHost();
+			this.setupExtensionShortcuts(this.sessionHost.extensionRunner);
 			this.appendErrorLine(error instanceof Error ? error.message : String(error));
 			this.ui.requestRender();
 			return false;
 		}
 		this.subscribeToHost();
+		// Snapshot the rebuilt runner's shortcuts (the host re-applied the UI context itself).
+		this.setupExtensionShortcuts(this.sessionHost.extensionRunner);
 
 		// Reset transient per-session UI state.
 		this.streamingComponent = undefined;
@@ -566,13 +690,9 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * `/new` — start a fresh session. Substrate-forced divergences from pi:
-	 *  - pi's `runtimeHost.newSession()` owns the harness + subscription swap; steward's
-	 *    only swaps the harness, so this reuses `swapToNewSession()` (the same dance
-	 *    deploy uses) rather than pi's one-liner.
-	 *  - pi's `result.cancelled` (newSession can prompt-to-save) has no steward analog —
-	 *    steward's `newSession()` never cancels.
-	 *  - pi's `handleFatalRuntimeError` is `swapToNewSession`'s `appendErrorLine` path.
+	 * `/new` — start a fresh session. `sessionHost.newSession()` only swaps the harness,
+	 * so this reuses `swapToNewSession()` (the same dance deploy uses) and surfaces any
+	 * failure via `swapToNewSession`'s `appendErrorLine` path.
 	 *
 	 * Forming guard: while the agent is undeployed it stays in its single birth session,
 	 * so `/new` is refused here (the primary guard) and again at the host primitive (the
@@ -597,14 +717,10 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * `/compact [instructions]` — compact the session history. Substrate-forced
-	 * divergences from pi:
-	 *  - pi reads `sessionManager.getEntries()` directly; steward's harness keeps its
-	 *    session private, so the host exposes the live entries (`sessionHost.getEntries()`).
-	 *  - pi's `showWarning` has no steward analog — its warning surface is `appendErrorLine`.
-	 *  - pi calls `this.session.compact()` and swallows the error (compaction failures
-	 *    surface as session events); steward calls `harness.compact()` directly and that
-	 *    THROWS, so failures are surfaced here instead.
+	 * `/compact [instructions]` — compact the session history. The harness keeps its
+	 * session private, so the live entries come from `sessionHost.getEntries()`, and
+	 * warnings surface via `appendErrorLine`. `harness.compact()` throws on failure, so
+	 * compaction errors are caught and surfaced here.
 	 */
 	private async handleCompactCommand(customInstructions?: string): Promise<void> {
 		const messageCount = this.sessionHost.getEntries().filter((e) => e.type === "message").length;
@@ -624,25 +740,42 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Show the Yes/No selector dialog: swap the editor for the selector in
-	 * `editorContainer`, focus it (the TUI then routes input to it), and resolve when
-	 * the user picks or cancels. No signal/timeout — steward drives this only for the
-	 * deploy confirm, which neither aborts nor times out.
+	 * Show a selector dialog: swap the editor for the selector in `editorContainer`, focus
+	 * it (the TUI then routes input to it), and resolve when the user picks or cancels. An
+	 * optional signal/timeout dismisses it programmatically — the deploy confirm passes
+	 * neither; extensions may.
 	 */
-	private showExtensionSelector(title: string, options: string[]): Promise<string | undefined> {
+	private showExtensionSelector(
+		title: string,
+		options: string[],
+		opts?: ExtensionUIDialogOptions,
+	): Promise<string | undefined> {
 		return new Promise((resolve) => {
+			if (opts?.signal?.aborted) {
+				resolve(undefined);
+				return;
+			}
+
+			const onAbort = () => {
+				this.hideExtensionSelector();
+				resolve(undefined);
+			};
+			opts?.signal?.addEventListener("abort", onAbort, { once: true });
+
 			this.extensionSelector = new ExtensionSelectorComponent(
 				title,
 				options,
 				(option) => {
+					opts?.signal?.removeEventListener("abort", onAbort);
 					this.hideExtensionSelector();
 					resolve(option);
 				},
 				() => {
+					opts?.signal?.removeEventListener("abort", onAbort);
 					this.hideExtensionSelector();
 					resolve(undefined);
 				},
-				{ tui: this.ui, onToggleToolsExpanded: () => this.toggleToolOutputExpansion() },
+				{ tui: this.ui, timeout: opts?.timeout, onToggleToolsExpanded: () => this.toggleToolOutputExpansion() },
 			);
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.extensionSelector);
@@ -662,25 +795,546 @@ export class InteractiveMode {
 	}
 
 	/** Yes/No confirm built on the selector. */
-	private async showExtensionConfirm(title: string, message: string): Promise<boolean> {
-		const result = await this.showExtensionSelector(`${title}\n${message}`, ["Yes", "No"]);
+	private async showExtensionConfirm(
+		title: string,
+		message: string,
+		opts?: ExtensionUIDialogOptions,
+	): Promise<boolean> {
+		const result = await this.showExtensionSelector(`${title}\n${message}`, ["Yes", "No"], opts);
 		return result === "Yes";
+	}
+
+	/** Show a single-line text input dialog, swapped into `editorContainer` like the selector. */
+	private showExtensionInput(
+		title: string,
+		placeholder?: string,
+		opts?: ExtensionUIDialogOptions,
+	): Promise<string | undefined> {
+		return new Promise((resolve) => {
+			if (opts?.signal?.aborted) {
+				resolve(undefined);
+				return;
+			}
+
+			const onAbort = () => {
+				this.hideExtensionInput();
+				resolve(undefined);
+			};
+			opts?.signal?.addEventListener("abort", onAbort, { once: true });
+
+			this.extensionInput = new ExtensionInputComponent(
+				title,
+				placeholder,
+				(value) => {
+					opts?.signal?.removeEventListener("abort", onAbort);
+					this.hideExtensionInput();
+					resolve(value);
+				},
+				() => {
+					opts?.signal?.removeEventListener("abort", onAbort);
+					this.hideExtensionInput();
+					resolve(undefined);
+				},
+				{ tui: this.ui, timeout: opts?.timeout },
+			);
+
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.extensionInput);
+			this.ui.setFocus(this.extensionInput);
+			this.ui.requestRender();
+		});
+	}
+
+	private hideExtensionInput(): void {
+		this.extensionInput?.dispose();
+		this.editorContainer.clear();
+		this.editorContainer.addChild(this.editor);
+		this.extensionInput = undefined;
+		this.ui.setFocus(this.editor);
+		this.ui.requestRender();
+	}
+
+	/** Show a multi-line editor dialog (with Ctrl+G external-editor support). */
+	private showExtensionEditor(title: string, prefill?: string): Promise<string | undefined> {
+		return new Promise((resolve) => {
+			this.extensionEditor = new ExtensionEditorComponent(
+				this.ui,
+				this.keybindings,
+				title,
+				prefill,
+				(value) => {
+					this.hideExtensionEditor();
+					resolve(value);
+				},
+				() => {
+					this.hideExtensionEditor();
+					resolve(undefined);
+				},
+			);
+
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.extensionEditor);
+			this.ui.setFocus(this.extensionEditor);
+			this.ui.requestRender();
+		});
+	}
+
+	private hideExtensionEditor(): void {
+		this.editorContainer.clear();
+		this.editorContainer.addChild(this.editor);
+		this.extensionEditor = undefined;
+		this.ui.setFocus(this.editor);
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Swap in an extension-supplied editor (or restore the default on undefined). The new
+	 * editor inherits the default's submit/change callbacks, current text, and appearance,
+	 * so `handleSubmit` and bash-mode coloring keep working against `this.editor`.
+	 */
+	private setCustomEditorComponent(factory: EditorFactory | undefined): void {
+		this.editorComponentFactory = factory;
+		const currentText = this.editor.getText();
+		this.editorContainer.clear();
+
+		if (factory) {
+			const newEditor = factory(this.ui, getEditorTheme(), this.keybindings);
+			newEditor.onSubmit = this.defaultEditor.onSubmit;
+			newEditor.onChange = this.defaultEditor.onChange;
+			newEditor.setText(currentText);
+			if (newEditor.borderColor !== undefined) {
+				newEditor.borderColor = this.defaultEditor.borderColor;
+			}
+			newEditor.setPaddingX?.(this.defaultEditor.getPaddingX());
+			if (newEditor.setAutocompleteProvider && this.autocompleteProvider) {
+				newEditor.setAutocompleteProvider(this.autocompleteProvider);
+			}
+			this.editor = newEditor;
+		} else {
+			this.defaultEditor.setText(currentText);
+			this.editor = this.defaultEditor;
+		}
+
+		this.editorContainer.addChild(this.editor);
+		this.ui.setFocus(this.editor);
+		this.ui.requestRender();
+	}
+
+	/** Route an extension notification to the matching chat-log line. */
+	private showExtensionNotify(message: string, type?: "info" | "warning" | "error"): void {
+		if (type === "error") {
+			this.showError(message);
+		} else if (type === "warning") {
+			this.showWarning(message);
+		} else {
+			this.showStatus(message);
+		}
+	}
+
+	/**
+	 * Show a custom component with keyboard focus. Overlay mode renders on top of existing
+	 * content; otherwise the component takes over `editorContainer` until `done` is called.
+	 */
+	private async showExtensionCustom<T>(
+		factory: (
+			tui: TUI,
+			thm: Theme,
+			keybindings: KeybindingsManager,
+			done: (result: T) => void,
+		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
+		options?: {
+			overlay?: boolean;
+			overlayOptions?: OverlayOptions | (() => OverlayOptions);
+			onHandle?: (handle: OverlayHandle) => void;
+		},
+	): Promise<T> {
+		const savedText = this.editor.getText();
+		const isOverlay = options?.overlay ?? false;
+
+		const restoreEditor = () => {
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
+			this.editor.setText(savedText);
+			this.ui.setFocus(this.editor);
+			this.ui.requestRender();
+		};
+
+		return new Promise((resolve, reject) => {
+			let component: Component & { dispose?(): void };
+			let closed = false;
+
+			const close = (result: T) => {
+				if (closed) return;
+				closed = true;
+				if (isOverlay) this.ui.hideOverlay();
+				else restoreEditor();
+				resolve(result);
+				try {
+					component?.dispose?.();
+				} catch {
+					// Ignore dispose errors.
+				}
+			};
+
+			Promise.resolve(factory(this.ui, theme, this.keybindings, close))
+				.then((c) => {
+					if (closed) return;
+					component = c;
+					if (isOverlay) {
+						const resolveOptions = (): OverlayOptions | undefined => {
+							if (options?.overlayOptions) {
+								return typeof options.overlayOptions === "function"
+									? options.overlayOptions()
+									: options.overlayOptions;
+							}
+							const w = (component as { width?: number }).width;
+							return w ? { width: w } : undefined;
+						};
+						const handle = this.ui.showOverlay(component, resolveOptions());
+						options?.onHandle?.(handle);
+					} else {
+						this.editorContainer.clear();
+						this.editorContainer.addChild(component);
+						this.ui.setFocus(component);
+						this.ui.requestRender();
+					}
+				})
+				.catch((err) => {
+					if (closed) return;
+					if (!isOverlay) restoreEditor();
+					reject(err);
+				});
+		});
+	}
+
+	/** Surface an extension error (message plus indented stack) in the chat log. */
+	private showExtensionError(extensionPath: string, error: string, stack?: string): void {
+		const errorMsg = `Extension "${extensionPath}" error: ${error}`;
+		this.chatContainer.addChild(new Text(theme.fg("error", errorMsg), 1, 0));
+		if (stack) {
+			const stackLines = stack
+				.split("\n")
+				.slice(1)
+				.map((line) => theme.fg("dim", `  ${line.trim()}`))
+				.join("\n");
+			if (stackLines) {
+				this.chatContainer.addChild(new Text(stackLines, 1, 0));
+			}
+		}
+		this.ui.requestRender();
+	}
+
+	/** Set extension status text in the footer data provider (read by custom footers). */
+	private setExtensionStatus(key: string, text: string | undefined): void {
+		this.footerDataProvider.setExtensionStatus(key, text);
+		this.ui.requestRender();
+	}
+
+	/** Show the streaming loader with the current working message/indicator. */
+	private showWorkingLoader(): void {
+		this.statusContainer.clear();
+		if (!this.workingVisible) return;
+		this.loader.setMessage(this.workingMessage ?? DEFAULT_WORKING_MESSAGE);
+		this.loader.setIndicator(this.workingIndicatorOptions);
+		this.statusContainer.addChild(this.loader);
+		this.loader.start();
+	}
+
+	private setWorkingVisible(visible: boolean): void {
+		this.workingVisible = visible;
+		if (!visible) {
+			this.loader.stop();
+			this.statusContainer.clear();
+		} else if (this.busy) {
+			this.showWorkingLoader();
+		}
+		this.ui.requestRender();
+	}
+
+	private setWorkingIndicator(options?: WorkingIndicatorOptions): void {
+		this.workingIndicatorOptions = options;
+		if (this.busy && this.workingVisible) {
+			this.loader.setIndicator(options);
+		}
+		this.ui.requestRender();
+	}
+
+	private setHiddenThinkingLabel(label?: string): void {
+		this.hiddenThinkingLabel = label ?? DEFAULT_HIDDEN_THINKING_LABEL;
+		for (const child of this.chatContainer.children) {
+			if (child instanceof AssistantMessageComponent) {
+				child.setHiddenThinkingLabel(this.hiddenThinkingLabel);
+			}
+		}
+		this.streamingComponent?.setHiddenThinkingLabel(this.hiddenThinkingLabel);
+		this.ui.requestRender();
+	}
+
+	/** Set or clear an extension widget (string array or component factory), then re-render. */
+	private setExtensionWidget(
+		key: string,
+		content: string[] | ((tui: TUI, thm: Theme) => Component & { dispose?(): void }) | undefined,
+		options?: ExtensionWidgetOptions,
+	): void {
+		const placement = options?.placement ?? "aboveEditor";
+		const removeExisting = (map: Map<string, Component & { dispose?(): void }>) => {
+			const existing = map.get(key);
+			if (existing?.dispose) existing.dispose();
+			map.delete(key);
+		};
+
+		removeExisting(this.extensionWidgetsAbove);
+		removeExisting(this.extensionWidgetsBelow);
+
+		if (content === undefined) {
+			this.renderWidgets();
+			return;
+		}
+
+		let component: Component & { dispose?(): void };
+		if (Array.isArray(content)) {
+			const container = new Container();
+			for (const line of content.slice(0, MAX_WIDGET_LINES)) {
+				container.addChild(new Text(line, 1, 0));
+			}
+			if (content.length > MAX_WIDGET_LINES) {
+				container.addChild(new Text(theme.fg("muted", "... (widget truncated)"), 1, 0));
+			}
+			component = container;
+		} else {
+			component = content(this.ui, theme);
+		}
+
+		const targetMap = placement === "belowEditor" ? this.extensionWidgetsBelow : this.extensionWidgetsAbove;
+		targetMap.set(key, component);
+		this.renderWidgets();
+	}
+
+	private clearExtensionWidgets(): void {
+		for (const widget of this.extensionWidgetsAbove.values()) {
+			widget.dispose?.();
+		}
+		for (const widget of this.extensionWidgetsBelow.values()) {
+			widget.dispose?.();
+		}
+		this.extensionWidgetsAbove.clear();
+		this.extensionWidgetsBelow.clear();
+		this.renderWidgets();
+	}
+
+	private renderWidgets(): void {
+		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, true);
+		this.renderWidgetContainer(this.widgetContainerBelow, this.extensionWidgetsBelow, false);
+		this.ui.requestRender();
+	}
+
+	private renderWidgetContainer(
+		container: Container,
+		widgets: Map<string, Component & { dispose?(): void }>,
+		leadingSpacer: boolean,
+	): void {
+		container.clear();
+		if (widgets.size === 0) return;
+		if (leadingSpacer) {
+			container.addChild(new Spacer(1));
+		}
+		for (const component of widgets.values()) {
+			container.addChild(component);
+		}
+	}
+
+	/** Install a custom footer component, or clear it (steward has no built-in footer row). */
+	private setExtensionFooter(
+		factory:
+			| ((tui: TUI, thm: Theme, footerData: ReadonlyFooterDataProvider) => Component & { dispose?(): void })
+			| undefined,
+	): void {
+		if (this.customFooter?.dispose) {
+			this.customFooter.dispose();
+		}
+		this.footerContainer.clear();
+		if (factory) {
+			this.customFooter = factory(this.ui, theme, this.footerDataProvider);
+			this.footerContainer.addChild(this.customFooter);
+		} else {
+			this.customFooter = undefined;
+		}
+		this.ui.requestRender();
+	}
+
+	/** Install a custom header component, or clear it (steward's built-in header is in the chat log). */
+	private setExtensionHeader(factory: ((tui: TUI, thm: Theme) => Component & { dispose?(): void }) | undefined): void {
+		if (this.customHeader?.dispose) {
+			this.customHeader.dispose();
+		}
+		this.headerContainer.clear();
+		if (factory) {
+			this.customHeader = factory(this.ui, theme);
+			if (isExpandable(this.customHeader)) {
+				this.customHeader.setExpanded(this.toolOutputExpanded);
+			}
+			this.headerContainer.addChild(this.customHeader);
+		} else {
+			this.customHeader = undefined;
+		}
+		this.ui.requestRender();
+	}
+
+	private addExtensionTerminalInputListener(handler: TerminalInputHandler): () => void {
+		const unsubscribe = this.ui.addInputListener(handler);
+		this.extensionTerminalInputUnsubscribers.add(unsubscribe);
+		return () => {
+			unsubscribe();
+			this.extensionTerminalInputUnsubscribers.delete(unsubscribe);
+		};
+	}
+
+	private clearExtensionTerminalInputListeners(): void {
+		for (const unsubscribe of this.extensionTerminalInputUnsubscribers) {
+			unsubscribe();
+		}
+		this.extensionTerminalInputUnsubscribers.clear();
+	}
+
+	/** Snapshot the extension keyboard shortcuts; handleGlobalInput matches against them. */
+	private setupExtensionShortcuts(runner: ExtensionRunner): void {
+		this.extensionShortcuts = runner.getShortcuts(this.keybindings.getEffectiveConfig());
+	}
+
+	/** Reset all extension-owned UI back to defaults (before a reload rebuilds it). */
+	private resetExtensionUI(): void {
+		if (this.extensionSelector) this.hideExtensionSelector();
+		if (this.extensionInput) this.hideExtensionInput();
+		if (this.extensionEditor) this.hideExtensionEditor();
+		this.ui.hideOverlay();
+		this.clearExtensionTerminalInputListeners();
+		this.extensionShortcuts = new Map();
+		this.setExtensionFooter(undefined);
+		this.setExtensionHeader(undefined);
+		this.clearExtensionWidgets();
+		this.footerDataProvider.clearExtensionStatuses();
+		this.autocompleteProviderWrappers = [];
+		this.setCustomEditorComponent(undefined);
+		this.setupAutocompleteProvider();
+		this.workingMessage = undefined;
+		this.workingVisible = true;
+		this.setWorkingIndicator();
+		this.setHiddenThinkingLabel();
+	}
+
+	/** The UI surface handed to extensions via `ctx.ui`. */
+	private createExtensionUIContext(): ExtensionUIContext {
+		return {
+			select: (title, options, opts) => this.showExtensionSelector(title, options, opts),
+			confirm: (title, message, opts) => this.showExtensionConfirm(title, message, opts),
+			input: (title, placeholder, opts) => this.showExtensionInput(title, placeholder, opts),
+			notify: (message, type) => this.showExtensionNotify(message, type),
+			onTerminalInput: (handler) => this.addExtensionTerminalInputListener(handler),
+			setStatus: (key, text) => this.setExtensionStatus(key, text),
+			setWorkingMessage: (message) => {
+				this.workingMessage = message;
+				if (this.busy && this.workingVisible) {
+					this.loader.setMessage(message ?? DEFAULT_WORKING_MESSAGE);
+				}
+			},
+			setWorkingVisible: (visible) => this.setWorkingVisible(visible),
+			setWorkingIndicator: (options) => this.setWorkingIndicator(options),
+			setHiddenThinkingLabel: (label) => this.setHiddenThinkingLabel(label),
+			setWidget: (key, content, options) => this.setExtensionWidget(key, content, options),
+			setFooter: (factory) => this.setExtensionFooter(factory),
+			setHeader: (factory) => this.setExtensionHeader(factory),
+			setTitle: (title) => this.ui.terminal.setTitle(title),
+			custom: (factory, options) => this.showExtensionCustom(factory, options),
+			pasteToEditor: (text) => this.editor.handleInput(`\x1b[200~${text}\x1b[201~`),
+			setEditorText: (text) => this.editor.setText(text),
+			getEditorText: () => this.editor.getExpandedText?.() ?? this.editor.getText(),
+			editor: (title, prefill) => this.showExtensionEditor(title, prefill),
+			addAutocompleteProvider: (factory) => {
+				this.autocompleteProviderWrappers.push(factory);
+				this.setupAutocompleteProvider();
+			},
+			setEditorComponent: (factory) => this.setCustomEditorComponent(factory),
+			getEditorComponent: () => this.editorComponentFactory,
+			get theme() {
+				return theme;
+			},
+			getAllThemes: () => getAvailableThemesWithPaths(),
+			getTheme: (name) => getThemeByName(name),
+			setTheme: (themeOrName) => {
+				if (themeOrName instanceof Theme) {
+					setThemeInstance(themeOrName);
+					this.ui.requestRender();
+					return { success: true };
+				}
+				const result = setTheme(themeOrName, true);
+				if (result.success) {
+					this.ui.requestRender();
+				}
+				return result;
+			},
+			getToolsExpanded: () => this.toolOutputExpanded,
+			setToolsExpanded: (expanded) => this.setToolsExpanded(expanded),
+		};
+	}
+
+	/**
+	 * Session-control actions for extension command handlers. `waitForIdle`/`newSession`/
+	 * `reload` are wired to steward's host; the tree-navigation actions (fork/navigateTree/
+	 * switchSession) are out of scope here and report cancelled.
+	 */
+	private createCommandContextActions(): ExtensionCommandContextActions {
+		return {
+			waitForIdle: () => this.harness.waitForIdle(),
+			newSession: async () => {
+				if (!(await this.swapToNewSession("new"))) return { cancelled: true };
+				this.renderCurrentSessionState();
+				this.ui.requestRender();
+				return { cancelled: false };
+			},
+			fork: async () => ({ cancelled: true }),
+			navigateTree: async () => ({ cancelled: true }),
+			switchSession: async () => ({ cancelled: true }),
+			reload: async () => {
+				await this.handleReloadCommand();
+			},
+		};
 	}
 
 	/**
 	 * Run a user-typed shell command (`!cmd` / `!!cmd`).
 	 *
-	 * Deviation from `@opsyhq/coding-agent`: pi routes through `session.executeBash`,
-	 * which adds extension `user_bash` interception, `recordBashResult` (the command +
-	 * output enters the LLM context as a `bashExecution` message), and a streaming
-	 * `pendingMessagesContainer`. Steward has none of those abstractions, so it calls
-	 * `executeBashWithOperations` with pi's default local shell ops directly (pi's
-	 * `executeBash` does the same internally), owns the AbortController itself (pi's
-	 * session owns it), and surfaces failures via `appendErrorLine` (pi uses
-	 * `showError`). The result is NOT recorded into the agent's context — so `!` vs `!!`
-	 * differ only by the panel's border color, which is the visible rendering pi produces.
+	 * Extensions may intercept via the `user_bash` event: returning a `result` short-circuits
+	 * execution, and returning `operations` swaps the shell backend. The result is recorded
+	 * into the agent's context unless `!!` was used (`excludeFromContext`).
 	 */
 	private async handleBashCommand(command: string, excludeFromContext = false): Promise<void> {
+		const eventResult = await this.sessionHost.extensionRunner.emitUserBash({
+			type: "user_bash",
+			command,
+			excludeFromContext,
+			cwd: this.sessionHost.getCwd(),
+		});
+
+		// An extension handled execution itself — display and record its result directly.
+		if (eventResult?.result) {
+			const result = eventResult.result;
+			this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext);
+			this.chatContainer.addChild(this.bashComponent);
+			if (result.output) {
+				this.bashComponent.appendOutput(result.output);
+			}
+			this.bashComponent.setComplete(
+				result.exitCode,
+				result.cancelled,
+				result.truncated ? ({ truncated: true, content: result.output } as TruncationResult) : undefined,
+				result.fullOutputPath,
+			);
+			await this.harness.appendMessage(createBashExecutionMessage(command, result, { excludeFromContext }));
+			this.bashComponent = undefined;
+			this.ui.requestRender();
+			return;
+		}
+
 		this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext);
 		this.chatContainer.addChild(this.bashComponent);
 		this.ui.requestRender();
@@ -690,7 +1344,7 @@ export class InteractiveMode {
 			const result = await executeBashWithOperations(
 				command,
 				this.sessionHost.getCwd(),
-				createLocalBashOperations(),
+				eventResult?.operations ?? createLocalBashOperations(),
 				{
 					onChunk: (chunk) => {
 						if (this.bashComponent) {
@@ -709,6 +1363,7 @@ export class InteractiveMode {
 					result.fullOutputPath,
 				);
 			}
+			await this.harness.appendMessage(createBashExecutionMessage(command, result, { excludeFromContext }));
 		} catch (error) {
 			if (this.bashComponent) {
 				this.bashComponent.setComplete(undefined, false);
@@ -750,9 +1405,8 @@ export class InteractiveMode {
 						event.toolName,
 						event.toolCallId,
 						event.args,
-						// Deviation from `@opsyhq/coding-agent`: pi reads showImages /
-						// imageWidthCells from its `settingsManager`. Steward has no
-						// settings manager, so pass `{}` and take the component defaults.
+						// No settings manager (showImages / imageWidthCells), so pass `{}`
+						// and take the component defaults.
 						{},
 						this.getRegisteredToolDefinition(event.toolName),
 						this.ui,
@@ -799,13 +1453,10 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Get a registered tool definition by name (for custom rendering). In pi this returns
-	 * the session's per-extension tool definition.
-	 *
-	 * Deviation from `@opsyhq/coding-agent`: steward has no extension tool
-	 * registry — every tool is built-in, and `ToolExecutionComponent`
-	 * reconstructs the built-in renderer from `cwd` itself. So there is never an
-	 * override to return; this is always `undefined`.
+	 * Get a registered tool definition by name (for custom rendering). There is no
+	 * extension tool registry — every tool is built-in, and `ToolExecutionComponent`
+	 * reconstructs the built-in renderer from `cwd` itself. So there is never an override
+	 * to return; this is always `undefined`.
 	 */
 	private getRegisteredToolDefinition(_toolName: string): undefined {
 		return undefined;
@@ -898,7 +1549,12 @@ export class InteractiveMode {
 				break;
 			}
 			case "assistant": {
-				const assistantComponent = new AssistantMessageComponent(message, false, this.markdownTheme);
+				const assistantComponent = new AssistantMessageComponent(
+					message,
+					false,
+					this.markdownTheme,
+					this.hiddenThinkingLabel,
+				);
 				this.chatContainer.addChild(assistantComponent);
 				break;
 			}
@@ -1014,7 +1670,12 @@ export class InteractiveMode {
 	}
 
 	private beginAssistantMessage(): void {
-		this.streamingComponent = new AssistantMessageComponent(undefined, false, this.markdownTheme);
+		this.streamingComponent = new AssistantMessageComponent(
+			undefined,
+			false,
+			this.markdownTheme,
+			this.hiddenThinkingLabel,
+		);
 		this.chatContainer.addChild(this.streamingComponent);
 	}
 
@@ -1029,8 +1690,8 @@ export class InteractiveMode {
 						content.name,
 						content.id,
 						content.arguments,
-						// Deviation from `@opsyhq/coding-agent`: no settings manager (see
-						// `tool_execution_start`); pass `{}` for the component defaults.
+						// No settings manager (see `tool_execution_start`); pass `{}` for the
+						// component defaults.
 						{},
 						this.getRegisteredToolDefinition(content.name),
 						this.ui,
@@ -1052,11 +1713,9 @@ export class InteractiveMode {
 	private finalizeAssistantMessage(message: AssistantMessage): void {
 		if (isFailureMessage(message)) {
 			// Drop any partial bubble and show the error/abort detail instead.
-			// Deviation from `@opsyhq/coding-agent`: pi lets `AssistantMessageComponent`
-			// render its own aborted/error stop reasons. Steward keeps its dedicated
-			// failure path here (and never opens a component for failure messages — see
-			// the `message_start` guard), so the component's abort/error branches stay
-			// unused and there is no double-rendering.
+			// A dedicated failure path handles aborted/error stop reasons here, and no
+			// component is ever opened for failure messages (see the `message_start`
+			// guard), so there is no double-rendering.
 			if (this.streamingComponent) {
 				this.chatContainer.removeChild(this.streamingComponent);
 				this.streamingComponent = undefined;
@@ -1092,13 +1751,75 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 	}
 
+	/**
+	 * Append a dim status line, reusing the previous one when it is still the last child so
+	 * a burst of status updates collapses to a single live line.
+	 */
+	private showStatus(message: string): void {
+		const children = this.chatContainer.children;
+		const last = children.length > 0 ? children[children.length - 1] : undefined;
+		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
+
+		if (last && secondLast && last === this.lastStatusText && secondLast === this.lastStatusSpacer) {
+			this.lastStatusText.setText(theme.fg("dim", message));
+			this.ui.requestRender();
+			return;
+		}
+
+		const spacer = new Spacer(1);
+		const text = new Text(theme.fg("dim", message), 1, 0);
+		this.chatContainer.addChild(spacer);
+		this.chatContainer.addChild(text);
+		this.lastStatusSpacer = spacer;
+		this.lastStatusText = text;
+		this.ui.requestRender();
+	}
+
+	private showError(errorMessage: string): void {
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(theme.fg("error", `Error: ${errorMessage}`), 1, 0));
+		this.chatContainer.addChild(new Spacer(1));
+		this.ui.requestRender();
+	}
+
+	private showWarning(warningMessage: string): void {
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(theme.fg("warning", `Warning: ${warningMessage}`), 1, 0));
+		this.ui.requestRender();
+	}
+
+	/**
+	 * `/reload` — rebuild extensions, skills, prompts, and keybindings in place. Guards
+	 * against running mid-stream, resets extension-owned UI, then re-applies the host's
+	 * rebuilt resources and re-wires autocomplete + shortcuts. The conversation is kept.
+	 */
+	private async handleReloadCommand(): Promise<void> {
+		if (this.busy) {
+			this.showWarning("Wait for the current response to finish before reloading.");
+			return;
+		}
+
+		this.resetExtensionUI();
+		try {
+			await this.sessionHost.reload();
+			this.keybindings.reload();
+			this.setupAutocompleteProvider();
+			this.setupExtensionShortcuts(this.sessionHost.extensionRunner);
+			const summary = this.sessionHost.getResourceSummary();
+			this.showStatus(
+				`Reloaded: ${summary.extensions} extensions, ${summary.skills} skills, ${summary.prompts} prompts, ${summary.commands} commands.`,
+			);
+			this.appendResourceDiagnostics(summary.diagnostics);
+		} catch (error) {
+			this.showError(`Reload failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
 	private setBusy(busy: boolean): void {
 		if (this.busy === busy) return;
 		this.busy = busy;
 		if (busy) {
-			this.statusContainer.clear();
-			this.statusContainer.addChild(this.loader);
-			this.loader.start();
+			this.showWorkingLoader();
 		} else {
 			this.loader.stop();
 			this.statusContainer.clear();
@@ -1109,10 +1830,9 @@ export class InteractiveMode {
 	/**
 	 * Recolor the editor border for bash mode.
 	 *
-	 * Deviation from `@opsyhq/coding-agent`: pi's non-bash branch uses
-	 * `theme.getThinkingBorderColor(this.session.thinkingLevel)`. Steward freezes the
-	 * thinking level in the SessionHost and tracks no per-keystroke thinking state, so it
-	 * restores the editor's constructed default border (`getEditorTheme().borderColor`).
+	 * The thinking level is frozen in the SessionHost and there is no per-keystroke
+	 * thinking state, so the non-bash branch restores the editor's constructed default
+	 * border (`getEditorTheme().borderColor`).
 	 */
 	private updateEditorBorderColor(): void {
 		this.editor.borderColor = this.isBashMode ? theme.getBashModeBorderColor() : getEditorTheme().borderColor;
@@ -1125,8 +1845,6 @@ export class InteractiveMode {
 
 	private setToolsExpanded(expanded: boolean): void {
 		this.toolOutputExpanded = expanded;
-		// Deviation from `@opsyhq/coding-agent`: pi also expands its active header
-		// (customHeader ?? builtInHeader); steward has no header component.
 		for (const child of this.chatContainer.children) {
 			if (isExpandable(child)) {
 				child.setExpanded(expanded);
@@ -1140,13 +1858,28 @@ export class InteractiveMode {
 			void this.handleCtrlC();
 			return { consume: true };
 		}
-		// Deviation from `@opsyhq/coding-agent`: pi binds this via
-		// `defaultEditor.onAction("app.tools.expand", ...)`. Steward's `Editor` has
-		// no `onAction`, so resolve the configured key here against the global
-		// keybindings (seeded with `app.tools.expand` by `KeybindingsManager`).
+		// The `Editor` has no `onAction`, so resolve the configured key here against the
+		// global keybindings (seeded with `app.tools.expand` by `KeybindingsManager`).
 		if (getKeybindings().matches(data, "app.tools.expand")) {
 			this.toggleToolOutputExpansion();
 			return { consume: true };
+		}
+		// Extension-registered shortcuts. Skipped while a dialog owns the editor (it has
+		// focus and consumes its own keys), matching the editor-focused dispatch elsewhere.
+		if (
+			this.extensionShortcuts.size > 0 &&
+			!this.extensionSelector &&
+			!this.extensionInput &&
+			!this.extensionEditor
+		) {
+			for (const [shortcut, registered] of this.extensionShortcuts) {
+				if (matchesKey(data, shortcut)) {
+					Promise.resolve(registered.handler(this.sessionHost.extensionRunner.createContext())).catch((err) => {
+						this.showError(`Shortcut handler error: ${err instanceof Error ? err.message : String(err)}`);
+					});
+					return { consume: true };
+				}
+			}
 		}
 		return undefined;
 	}

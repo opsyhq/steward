@@ -12,12 +12,10 @@
  * `build()` is also the landing site for the extension subsystem: it discovers +
  * loads extensions, builds the `ExtensionRunner`, surfaces discovered skills into
  * the frozen prompt, registers extension tools alongside the built-ins, binds the
- * `pi.*`/`ctx.*` action surface to the live harness, and translates the harness's
+ * `steward.*`/`ctx.*` action surface to the live harness, and translates the harness's
  * events into extension `ExtensionEvent`s.
  *
- * Substrate-forced divergence (flagged throughout): pi's `AgentSession` calls the
- * runner's emit methods inline from its own loop. Steward's `AgentHarness` instead
- * exposes a dual event mechanism, so the emission is split three ways:
+ * The harness exposes a dual event mechanism, so the emission is split three ways:
  *  (a) `harness.on(type)` native mutating hooks — tool_call, tool_result, context,
  *      before_agent_start, before_provider_payload, session_before_compact;
  *  (b) `harness.subscribe()` — a translator from `AgentEvent`/own-events to the
@@ -27,9 +25,11 @@
  *      interceptor path, so a mutating message_end must ride that seam).
  */
 
+import { readFileSync } from "node:fs";
 import type { Api, AssistantMessage, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
 import {
 	type AgentHarness,
+	type AgentHarnessResources,
 	type AgentMessage,
 	type AgentTool,
 	buildSessionContext,
@@ -41,14 +41,20 @@ import {
 } from "@opsyhq/agent";
 import type { NodeExecutionEnv } from "@opsyhq/agent/node";
 import { getAgentDir } from "../config.ts";
+import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { type AgentConfig, isDeployed, loadAgentConfig } from "./agent-config.ts";
 import type { AuthStorage } from "./auth-storage.ts";
+import type { ResourceDiagnostic, ResourceSummary } from "./diagnostics.ts";
 import { discoverAndLoadExtensions } from "./extensions/loader.ts";
-import { emitSessionShutdownEvent, ExtensionRunner } from "./extensions/runner.ts";
+import { type ExtensionErrorListener, ExtensionRunner, emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type {
 	ContextUsage,
 	ExtensionActions,
+	ExtensionCommandContextActions,
 	ExtensionContextActions,
+	ExtensionMode,
+	ExtensionUIContext,
+	InputSource,
 	ToolCallEvent,
 	ToolInfo,
 	ToolResultEvent,
@@ -56,7 +62,7 @@ import type {
 import { loadMemory } from "./memory.ts";
 import { createCustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
-import { loadPromptTemplates, type PromptTemplate } from "./prompt-templates.ts";
+import { loadPromptTemplates, type PromptTemplate, parseCommandArgs } from "./prompt-templates.ts";
 import { createAgentSession } from "./sdk.ts";
 import { openAgentSession } from "./session.ts";
 import { SessionManager } from "./session-manager.ts";
@@ -86,6 +92,28 @@ export interface SessionHostOptions {
 	authStorage: AuthStorage;
 }
 
+/** Options for `SessionHost.prompt()`. */
+export interface SessionHostPromptOptions {
+	/** Images to attach to the user turn. An `input` transform may also inject these. */
+	images?: ImageContent[];
+	/** Where the input came from. Default: `"interactive"`. */
+	source?: InputSource;
+	/** How to deliver the message while a turn is already streaming. */
+	streamingBehavior?: "steer" | "followUp";
+}
+
+/**
+ * The interactive mode's extension surface, handed to the host once and re-applied to
+ * every runner the host builds (per-session swap and `/reload`).
+ */
+export interface InteractiveContextBindings {
+	uiContext: ExtensionUIContext;
+	mode: ExtensionMode;
+	commandContextActions: ExtensionCommandContextActions;
+	onError?: ExtensionErrorListener;
+	shutdownHandler?: () => void;
+}
+
 /**
  * Replace every own-key of `target` with `replacement`'s in place.
  *
@@ -102,11 +130,31 @@ function replaceMessageInPlace(target: AgentMessage, replacement: AgentMessage):
 }
 
 /**
- * Scan a branch (root→leaf) from the end for the most recent compaction entry.
+ * Map steward's loaded skills/prompt templates into the shapes the harness exposes
+ * for explicit invocation (`harness.skill()` / `harness.promptFromTemplate()`).
  *
- * Substrate-forced: pi exposed `getLatestCompactionEntry` off its SessionManager;
- * steward's adapter doesn't, so it is authored inline against the engine's branch
- * entries (the engine persists compaction as a `compaction`-typed tree entry).
+ * Only skills need converting: steward's `Skill` carries just a `filePath` (the body
+ * is never held in memory), so a skill's `content` is the frontmatter-stripped
+ * SKILL.md body, read from disk here. Steward's `PromptTemplate` already carries
+ * `content` and is structurally a harness `PromptTemplate` (extra fields are ignored),
+ * so it passes straight through.
+ */
+function toHarnessResources(skills: Skill[], promptTemplates: PromptTemplate[]): AgentHarnessResources {
+	return {
+		skills: skills.map((skill) => ({
+			name: skill.name,
+			description: skill.description,
+			content: stripFrontmatter(readFileSync(skill.filePath, "utf-8")),
+			filePath: skill.filePath,
+			disableModelInvocation: skill.disableModelInvocation,
+		})),
+		promptTemplates,
+	};
+}
+
+/**
+ * Scan a branch (root→leaf) from the end for the most recent compaction entry.
+ * The engine persists compaction as a `compaction`-typed tree entry.
  */
 function getLatestCompactionEntry(entries: SessionTreeEntry[]): SessionTreeEntry | null {
 	for (let i = entries.length - 1; i >= 0; i--) {
@@ -137,7 +185,7 @@ export class SessionHost {
 	private _config?: AgentConfig;
 	private env?: NodeExecutionEnv;
 
-	// Extension subsystem state (Tier 5 wiring). Each is (re)built per session.
+	// Extension subsystem state. Each is (re)built per session.
 	private _extensionRunner?: ExtensionRunner;
 	private _sessionManager?: SessionManager;
 	private _modelRegistry?: ModelRegistry;
@@ -151,6 +199,12 @@ export class SessionHost {
 	private _skills: Skill[] = [];
 	/** Prompt templates discovered this session — surfaced as prompt-source commands. */
 	private _promptTemplates: PromptTemplate[] = [];
+	/** Extensions loaded this session, kept for the resource summary. */
+	private _extensionCount = 0;
+	/** Extension load failures from the last build, surfaced in the resource summary. */
+	private _loadErrors: { path: string; error: string }[] = [];
+	/** Skill name collisions from the last build, surfaced in the resource summary. */
+	private _skillDiagnostics: ResourceDiagnostic[] = [];
 	/** The frozen system prompt, backing `ctx.getSystemPrompt()`. */
 	private _systemPrompt = "";
 	/** The options the frozen prompt was built from, backing `ctx.getSystemPromptOptions()`. */
@@ -165,6 +219,14 @@ export class SessionHost {
 	private _turnIndex = 0;
 	/** Graceful-shutdown handler installed by the host mode (default no-op). */
 	private _shutdownHandler: () => void = () => {};
+	/**
+	 * The interactive mode's extension surface, retained so it can be re-applied to every
+	 * runner the host builds. Undefined until `bindInteractiveContext()` runs — non-interactive
+	 * hosts (print) never call it, so their runners keep the `noOpUIContext`.
+	 */
+	private _interactiveBindings?: InteractiveContextBindings;
+	/** Teardown for the current runner's error listener, dropped before re-binding. */
+	private _extensionErrorUnsubscriber?: () => void;
 
 	constructor(options: SessionHostOptions) {
 		this.options = options;
@@ -191,6 +253,35 @@ export class SessionHost {
 	/** Install the graceful-shutdown handler exposed to extensions via `ctx.shutdown()`. */
 	setShutdownHandler(handler: () => void): void {
 		this._shutdownHandler = handler;
+	}
+
+	/**
+	 * Hand the interactive mode's extension surface (UI context, command-context actions,
+	 * error listener, shutdown handler) to the host and apply it to the live runner.
+	 *
+	 * The bindings are retained on the host and re-applied by `_applyInteractiveContext` to
+	 * every runner `build()`/`reload()` stands up, so a rebuilt runner never reverts to
+	 * `noOpUIContext`. Called once by the interactive mode after it subscribes to the host.
+	 */
+	bindInteractiveContext(bindings: InteractiveContextBindings): void {
+		this._interactiveBindings = bindings;
+		if (bindings.shutdownHandler) this.setShutdownHandler(bindings.shutdownHandler);
+		this._applyInteractiveContext(this.extensionRunner);
+	}
+
+	/**
+	 * Apply the retained interactive bindings to `runner`: set its UI context + mode, bind the
+	 * command-context actions, and (re)install the error listener. No-op when no interactive
+	 * mode has bound yet (the first `build()` runs before `bindInteractiveContext`, leaving the
+	 * runner on `noOpUIContext` until the mode binds).
+	 */
+	private _applyInteractiveContext(runner: ExtensionRunner): void {
+		const bindings = this._interactiveBindings;
+		if (!bindings) return;
+		runner.setUIContext(bindings.uiContext, bindings.mode);
+		runner.bindCommandContext(bindings.commandContextActions);
+		this._extensionErrorUnsubscriber?.();
+		this._extensionErrorUnsubscriber = bindings.onError ? runner.onError(bindings.onError) : undefined;
 	}
 
 	/**
@@ -227,13 +318,12 @@ export class SessionHost {
 	}
 
 	/**
-	 * Live slash-command metadata — extension + prompt + skill commands, read-only. Mirrors
-	 * the `getCommands` action wired into `runner.bindCore`, but that copy is a closure
-	 * inside `build()`, unreachable from the interactive mode — which needs the same list to
-	 * feed editor autocomplete (`createBaseAutocompleteProvider`). Exposed here for the same
-	 * reason as `getEntries`: the interactive mode can't read these off the private harness
-	 * session. Built-in interactive commands (`BUILTIN_SLASH_COMMANDS`) are layered in by the
-	 * caller, matching pi's `createBaseAutocompleteProvider`.
+	 * Live slash-command metadata — extension + prompt + skill commands, read-only. The
+	 * `getCommands` action wired into `runner.bindCore` is a closure inside `build()`,
+	 * unreachable from the interactive mode — which needs the same list to feed editor
+	 * autocomplete. Exposed here for the same reason as `getEntries`: the interactive mode
+	 * can't read these off the private harness session. Built-in interactive commands
+	 * (`BUILTIN_SLASH_COMMANDS`) are layered in by the caller.
 	 */
 	getCommands(): SlashCommandInfo[] {
 		const commands: SlashCommandInfo[] = [];
@@ -254,14 +344,37 @@ export class SessionHost {
 			});
 		}
 		for (const skill of this._skills) {
+			// Skills are invoked as `/skill:<name>`, disambiguating them from prompt-template
+			// commands.
 			commands.push({
-				name: skill.name,
+				name: `skill:${skill.name}`,
 				description: skill.description,
 				source: "skill",
 				sourceInfo: skill.sourceInfo,
 			});
 		}
 		return commands;
+	}
+
+	/**
+	 * Loaded-resource counts plus any load/collision diagnostics from the last build or
+	 * reload. The interactive mode prints this at startup and after `/reload`.
+	 */
+	getResourceSummary(): ResourceSummary {
+		const runner = this.extensionRunner;
+		const diagnostics: ResourceDiagnostic[] = [
+			...this._loadErrors.map(({ path, error }): ResourceDiagnostic => ({ type: "error", message: error, path })),
+			...this._skillDiagnostics,
+			...runner.getCommandDiagnostics(),
+			...runner.getShortcutDiagnostics(),
+		];
+		return {
+			extensions: this._extensionCount,
+			skills: this._skills.length,
+			prompts: this._promptTemplates.length,
+			commands: runner.getRegisteredCommands().length,
+			diagnostics,
+		};
 	}
 
 	/** Build the first session. */
@@ -290,11 +403,71 @@ export class SessionHost {
 	}
 
 	/**
+	 * Re-discover extensions, skills, and prompt templates in place against the live
+	 * session — no new harness, so the conversation is preserved. Re-points the live
+	 * harness at the rebuilt resources and tool set.
+	 *
+	 * The outgoing runner's extension flag values are carried into the new runtime so a
+	 * reload does not reset extension state. The system prompt is frozen for the session's
+	 * lifetime: the rebuilt prompt backs `ctx.getSystemPrompt()`, but the model-facing
+	 * prompt only changes on the next session.
+	 */
+	async reload(): Promise<void> {
+		const harness = this.harness;
+		const previousRunner = this.extensionRunner;
+		const previousFlagValues = previousRunner.getFlagValues();
+
+		// Shut the outgoing runtime down while its ctx is still valid, so extensions can
+		// clean up before the new runner takes over.
+		await emitSessionShutdownEvent(previousRunner, { type: "session_shutdown", reason: "reload" });
+
+		const config = loadAgentConfig(this.options.name);
+		const agentDir = getAgentDir(this.options.name);
+		const { runner, skills, promptTemplates, baseTools, extensionTools } = await this.buildResources({
+			config,
+			agentDir,
+			name: this.options.name,
+			sessionManager: this._sessionManager!,
+			modelRegistry: this._modelRegistry!,
+			discoverReason: "reload",
+			seedFlagValues: previousFlagValues,
+		});
+		this._config = config;
+
+		// Re-point the live harness at the rebuilt resources + tools. Active selection =
+		// previously-active tools that still exist, plus all extension tools (so newly
+		// registered ones become active); the filter drops tools an extension removed.
+		await harness.setResources(toHarnessResources(skills, promptTemplates));
+		const nextToolNames = new Set([...baseTools, ...extensionTools].map((tool) => tool.name));
+		const activeToolNames = [
+			...new Set([
+				...harness
+					.getActiveTools()
+					.map((tool) => tool.name)
+					.filter((name) => nextToolNames.has(name)),
+				...extensionTools.map((tool) => tool.name),
+			]),
+		];
+		await harness.setTools([...baseTools, ...extensionTools], activeToolNames);
+
+		// Bind the new runner's action surface + interactive context. The harness event
+		// wiring already reads `this.extensionRunner` live, so it re-points at the new
+		// runner without re-subscribing.
+		this.bindExtensionCore(runner, harness);
+		this._applyInteractiveContext(runner);
+
+		if (runner.hasHandlers("session_start")) {
+			await runner.emit({ type: "session_start", reason: "reload" });
+		}
+
+		previousRunner.invalidate();
+	}
+
+	/**
 	 * Persist a minimal assistant message into the current session (e.g. the
 	 * seeded "What is my purpose?" that opens a forming agent's first chat) and
-	 * return it so the caller can also render it. The field shape is copied from
-	 * `createFailureMessage` (agent-harness.ts:49): api/provider/model from the
-	 * configured model, zeroed `usage`, a "stop" stopReason, and a single text
+	 * return it so the caller can also render it. The field shape: api/provider/model
+	 * from the configured model, zeroed `usage`, a "stop" stopReason, and a single text
 	 * content block.
 	 */
 	async seedAssistantMessage(text: string): Promise<AssistantMessage> {
@@ -320,6 +493,109 @@ export class SessionHost {
 		return message;
 	}
 
+	/**
+	 * Submit user input through the full command pipeline, then hand off to the harness.
+	 *
+	 * Ordering:
+	 *  1. extension command (`/name args`) — runs immediately, even mid-stream;
+	 *  2. `input` hook — extensions may intercept (`handled`) or rewrite (`transform`);
+	 *  3. skill / prompt-template dispatch — routed through `AgentHarness` resources;
+	 *  4. plain prompt — or `steer`/`followUp` when a turn is already streaming.
+	 *
+	 * `images` stays plumbed through (default undefined) so an `input` transform can
+	 * inject images even though the interactive caller passes none.
+	 */
+	async prompt(text: string, options?: SessionHostPromptOptions): Promise<void> {
+		const runner = this.extensionRunner;
+		const harness = this.harness;
+
+		// 1. Extension command — manages its own LLM interaction via steward.sendMessage().
+		if (text.startsWith("/") && (await this.tryExecuteExtensionCommand(text))) {
+			return;
+		}
+
+		// 2. `input` hook — interception/transform before skill/template expansion.
+		let currentText = text;
+		let currentImages = options?.images;
+		if (runner.hasHandlers("input")) {
+			const result = await runner.emitInput(
+				currentText,
+				currentImages,
+				options?.source ?? "interactive",
+				this._isStreaming ? options?.streamingBehavior : undefined,
+			);
+			if (result.action === "handled") return;
+			if (result.action === "transform") {
+				currentText = result.text;
+				currentImages = result.images ?? currentImages;
+			}
+		}
+
+		// 3. Skill / prompt-template dispatch. `/skill:<name> [args]` → harness.skill;
+		//    `/<name> [args]` matching a loaded template → harness.promptFromTemplate.
+		if (currentText.startsWith("/skill:")) {
+			const spaceIndex = currentText.indexOf(" ");
+			const name = spaceIndex === -1 ? currentText.slice(7) : currentText.slice(7, spaceIndex);
+			const args = spaceIndex === -1 ? "" : currentText.slice(spaceIndex + 1).trim();
+			await harness.skill(name, args || undefined);
+			return;
+		}
+		if (currentText.startsWith("/")) {
+			const spaceIndex = currentText.indexOf(" ");
+			const name = spaceIndex === -1 ? currentText.slice(1) : currentText.slice(1, spaceIndex);
+			const template = this._promptTemplates.find((t) => t.name === name);
+			if (template) {
+				const argv = parseCommandArgs(spaceIndex === -1 ? "" : currentText.slice(spaceIndex + 1));
+				await harness.promptFromTemplate(name, argv);
+				return;
+			}
+		}
+
+		// 4. Plain prompt — or queue via steer()/followUp() when a turn is streaming.
+		//    An ambiguous mid-stream submit (no streamingBehavior) is rejected rather
+		//    than silently steered.
+		if (this._isStreaming) {
+			if (!options?.streamingBehavior) {
+				throw new Error(
+					"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+				);
+			}
+			if (options.streamingBehavior === "followUp") {
+				await harness.followUp(currentText, { images: currentImages });
+			} else {
+				await harness.steer(currentText, { images: currentImages });
+			}
+			return;
+		}
+		await harness.prompt(currentText, { images: currentImages });
+	}
+
+	/**
+	 * Run a leading-slash extension command if one matches. Returns true when a command
+	 * handled the input (so the caller sends nothing to the model).
+	 */
+	private async tryExecuteExtensionCommand(text: string): Promise<boolean> {
+		const spaceIndex = text.indexOf(" ");
+		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
+		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1);
+
+		const command = this.extensionRunner.getCommand(commandName);
+		if (!command) return false;
+
+		const ctx = this.extensionRunner.createCommandContext();
+		try {
+			await command.handler(args, ctx);
+			return true;
+		} catch (err) {
+			this.extensionRunner.emitError({
+				extensionPath: `command:${commandName}`,
+				event: "command",
+				error: err instanceof Error ? err.message : String(err),
+			});
+			return true;
+		}
+	}
+
 	private async build(fresh: boolean): Promise<AgentHarness> {
 		const { name, model, thinkingLevel, authStorage } = this.options;
 		const previousEnv = this.env;
@@ -331,43 +607,140 @@ export class SessionHost {
 		const { session, env } = await openAgentSession(name, { fresh });
 		const agentDir = getAgentDir(name);
 
-		// Substrate seams the extension subsystem is wired against: a SessionManager
-		// adapter over the engine's Session, and the model registry (for auth checks +
-		// provider registration). The metadata read is what the adapter keys its file
-		// snapshot off of.
+		// The seams the extension subsystem is wired against: a SessionManager adapter
+		// over the engine's Session, and the model registry (for auth checks + provider
+		// registration). The metadata read is what the adapter keys its file snapshot
+		// off of.
 		const metadata = await session.getMetadata();
 		const sessionManager = new SessionManager(session, metadata);
 		const modelRegistry = ModelRegistry.create(authStorage);
+		this._sessionManager = sessionManager;
+		this._modelRegistry = modelRegistry;
 
-		// Discover + load extensions, then build the runner. Substrate-forced divergence:
-		// steward scopes extensions per-agent — both project-local (`<agentDir>/.steward/
-		// extensions/`) and "global" (`<agentDir>/extensions/`) resolve under the agent's
-		// own home, because steward's shared dir is pi's credential store, not an extension
-		// home. So cwd and agentDir are both the per-agent dir here.
+		// Discover extensions, load skills/prompts, freeze the prompt, assemble tools.
+		// `reload` (fresh) discovers as a new-session reload; resume/first-start as startup.
+		const { runner, skills, promptTemplates, systemPrompt, baseTools, extensionTools } = await this.buildResources({
+			config,
+			agentDir,
+			name,
+			sessionManager,
+			modelRegistry,
+			discoverReason: fresh ? "reload" : "startup",
+		});
+
+		const { harness } = await createAgentSession({
+			env,
+			session,
+			model,
+			systemPrompt,
+			thinkingLevel,
+			tools: [...baseTools, ...extensionTools],
+			resources: toHarnessResources(skills, promptTemplates),
+			authStorage,
+		});
+
+		this._config = config;
+		this._harness = harness;
+		this.env = env;
+
+		// Bind the steward.*/ctx.* action surface to the live harness, re-apply the interactive
+		// UI/command-context surface (no-op on the very first build, before the mode binds),
+		// then translate the harness's events into extension events. Order: bind before wire
+		// so handlers that fire during session_start see a fully-bound context.
+		this.bindExtensionCore(runner, harness);
+		this._applyInteractiveContext(runner);
+		this._unsubscribe = this.wireExtensionEvents(harness);
+
+		// Announce the session to extensions (guarded — no handlers ⇒ no-op).
+		if (runner.hasHandlers("session_start")) {
+			await runner.emit({ type: "session_start", reason: fresh ? "new" : "startup" });
+		}
+
+		// Release the superseded session: shut its extension runtime down (while its
+		// ctx is still valid so extensions can clean up), invalidate it so any captured
+		// ctx throws, drop its harness listeners, then release its env.
+		if (previousRunner) {
+			await emitSessionShutdownEvent(previousRunner, { type: "session_shutdown", reason: "new" });
+			previousRunner.invalidate();
+		}
+		for (const unsubscribe of previousUnsubscribe) {
+			try {
+				unsubscribe();
+			} catch {
+				/* listener already detached with the discarded harness */
+			}
+		}
+		await previousEnv?.cleanup();
+		return harness;
+	}
+
+	/**
+	 * Discover + load extensions, build the runner, surface discovered skill/prompt
+	 * paths into freshly-loaded resources, freeze the system prompt, and assemble the
+	 * base + extension tool set. Shared by `build()` (per-session) and `reload()`
+	 * (in-place, against the live session). Mutates the resource-half host state
+	 * (`_extensionRunner`, `_skills`, `_promptTemplates`, `_systemPrompt(Options)`,
+	 * `_baseTools`, `_extensionTools`) and returns the pieces the caller needs to
+	 * stand up or re-point the harness.
+	 *
+	 * `seedFlagValues` carries an outgoing runner's extension flag values into the new
+	 * runtime (reload only) — `build()` starts a new session and leaves flags at their
+	 * defaults.
+	 */
+	private async buildResources(params: {
+		config: AgentConfig;
+		agentDir: string;
+		name: string;
+		sessionManager: SessionManager;
+		modelRegistry: ModelRegistry;
+		discoverReason: "startup" | "reload";
+		seedFlagValues?: Map<string, boolean | string>;
+	}): Promise<{
+		runner: ExtensionRunner;
+		skills: Skill[];
+		promptTemplates: PromptTemplate[];
+		systemPrompt: string;
+		baseTools: AgentTool[];
+		extensionTools: AgentTool[];
+		errors: { path: string; error: string }[];
+	}> {
+		const { config, agentDir, name, sessionManager, modelRegistry, discoverReason, seedFlagValues } = params;
+
+		// Discover + load extensions, then build the runner. Steward scopes extensions
+		// per-agent — both project-local (`<agentDir>/.steward/extensions/`) and "global"
+		// (`<agentDir>/extensions/`) resolve under the agent's own home, because steward's
+		// shared dir is the credential store, not an extension home. So cwd and agentDir
+		// are both the per-agent dir here.
 		const { extensions, errors, runtime } = await discoverAndLoadExtensions([], agentDir, agentDir);
 		const runner = new ExtensionRunner(extensions, runtime, agentDir, sessionManager, modelRegistry);
 		this._extensionRunner = runner;
-		this._sessionManager = sessionManager;
-		this._modelRegistry = modelRegistry;
+		this._extensionCount = extensions.length;
+		this._loadErrors = errors;
+		// Carry an outgoing runner's flag values into the new runtime before any
+		// resources_discover handler can read them (reload only).
+		if (seedFlagValues) {
+			for (const [flag, value] of seedFlagValues) runner.setFlagValue(flag, value);
+		}
 		// Surface load errors through the runner's error channel (no listeners yet at
-		// build time → silent, matching pi: the host mode attaches a listener later).
+		// build time → silent: the host mode attaches a listener later).
 		for (const { path, error } of errors) {
 			runner.emitError({ extensionPath: path, event: "load", error });
 		}
 
 		// Let extensions contribute additional skill/prompt/theme paths before the
 		// prompt is frozen. Fires after the runner exists.
-		const discovered = await runner.emitResourcesDiscover(agentDir, fresh ? "reload" : "startup");
+		const discovered = await runner.emitResourcesDiscover(agentDir, discoverReason);
 
 		// Read curated files ONCE and freeze them into the prompt. Mid-session edits
 		// (memory tool / file tools) persist to disk but only enter the prompt next session.
 		const { soul, memory, user } = loadMemory(name);
-		const { skills } = loadSkills({
+		const { skills, diagnostics: skillDiagnostics } = loadSkills({
 			cwd: agentDir,
 			agentDir,
 			skillPaths: discovered.skillPaths.map((s) => s.path),
 			includeDefaults: true,
 		});
+		this._skillDiagnostics = skillDiagnostics;
 		const promptTemplates = loadPromptTemplates({
 			cwd: agentDir,
 			agentDir,
@@ -376,13 +749,6 @@ export class SessionHost {
 		});
 		this._skills = skills;
 		this._promptTemplates = promptTemplates;
-
-		// Skills are appended to the frozen prompt. The structured options
-		// are retained so extensions can read them via ctx.getSystemPromptOptions().
-		const systemPromptOptions: BuildSystemPromptOptions = { config, cwd: agentDir, soul, memory, user, skills };
-		const systemPrompt = buildSystemPrompt(systemPromptOptions);
-		this._systemPrompt = systemPrompt;
-		this._systemPromptOptions = systemPromptOptions;
 
 		// Tools operate in the agent's home dir, where SOUL/MEMORY/USER.md and the
 		// workspace/ subdir live. memory is steward's curated-notes tool; the rest
@@ -412,53 +778,28 @@ export class SessionHost {
 		this._baseTools = baseTools;
 		this._extensionTools = extensionTools;
 
-		const { harness } = await createAgentSession({
-			env,
-			session,
-			model,
-			systemPrompt,
-			thinkingLevel,
-			tools: [...baseTools, ...extensionTools],
-			authStorage,
-		});
+		// Skills are appended to the frozen prompt. The structured options
+		// are retained so extensions can read them via ctx.getSystemPromptOptions().
+		const selectedTools = [...baseTools, ...extensionTools].map((t) => t.name);
+		const systemPromptOptions: BuildSystemPromptOptions = {
+			config,
+			cwd: agentDir,
+			soul,
+			memory,
+			user,
+			skills,
+			selectedTools,
+		};
+		const systemPrompt = buildSystemPrompt(systemPromptOptions);
+		this._systemPrompt = systemPrompt;
+		this._systemPromptOptions = systemPromptOptions;
 
-		this._config = config;
-		this._harness = harness;
-		this.env = env;
-
-		// Bind the pi.*/ctx.* action surface to the live harness, then translate the
-		// harness's events into extension events. Order: bind before wire so handlers
-		// that fire during session_start see a fully-bound context.
-		this.bindExtensionCore(runner, harness);
-		this._unsubscribe = this.wireExtensionEvents(runner, harness);
-
-		// Announce the session to extensions (guarded — no handlers ⇒ no-op).
-		if (runner.hasHandlers("session_start")) {
-			await runner.emit({ type: "session_start", reason: fresh ? "new" : "startup" });
-		}
-
-		// Release the superseded session: shut its extension runtime down (while its
-		// ctx is still valid so extensions can clean up), invalidate it so any captured
-		// ctx throws, drop its harness listeners, then release its env.
-		if (previousRunner) {
-			await emitSessionShutdownEvent(previousRunner, { type: "session_shutdown", reason: "new" });
-			previousRunner.invalidate();
-		}
-		for (const unsubscribe of previousUnsubscribe) {
-			try {
-				unsubscribe();
-			} catch {
-				/* listener already detached with the discarded harness */
-			}
-		}
-		await previousEnv?.cleanup();
-		return harness;
+		return { runner, skills, promptTemplates, systemPrompt, baseTools, extensionTools, errors };
 	}
 
 	/**
-	 * Derive context-window usage for the active model. Substrate-forced: pi read this
-	 * off its SessionManager; steward derives it from the engine's branch entries + the
-	 * `@opsyhq/agent` compaction helpers. Returns `{tokens:null,...}` right after a
+	 * Derive context-window usage for the active model from the engine's branch entries +
+	 * the `@opsyhq/agent` compaction helpers. Returns `{tokens:null,...}` right after a
 	 * compaction (before the next assistant response re-establishes a usage figure).
 	 */
 	private computeContextUsage(harness: AgentHarness, sessionManager: SessionManager): ContextUsage | undefined {
@@ -498,9 +839,9 @@ export class SessionHost {
 	}
 
 	/**
-	 * Bind the `pi.*` actions + `ctx.*` context actions to the live harness via
+	 * Bind the `steward.*` actions + `ctx.*` context actions to the live harness via
 	 * `runner.bindCore()`. Providers are flushed through the constructed modelRegistry
-	 * (2-arg bindCore, no providerActions), so queued `pi.registerProvider(...)` calls
+	 * (2-arg bindCore, no providerActions), so queued `steward.registerProvider(...)` calls
 	 * apply immediately. `harness`/`sessionManager`/`modelRegistry` are captured locally
 	 * so each binding stays tied to its own session even after a `newSession()` swap.
 	 */
@@ -524,9 +865,8 @@ export class SessionHost {
 					);
 					return;
 				}
-				// triggerTurn (flagged substrate adapter): under steward's substrate a
-				// persisted custom_message auto-surfaces into context, so pi's persist+
-				// prompt path would double-inject. Instead we drive the turn with the
+				// triggerTurn: a persisted custom_message auto-surfaces into context, so a
+				// persist+prompt path would double-inject. Instead we drive the turn with the
 				// message's own content exactly once (delivered as a user-role turn — the
 				// customType/details/renderer are not applied on this triggering path).
 				const text = contentToText(message.content);
@@ -612,8 +952,9 @@ export class SessionHost {
 					});
 				}
 				for (const skill of this._skills) {
+					// Skills are invoked as `/skill:<name>`; kept identical to SessionHost.getCommands().
 					commands.push({
-						name: skill.name,
+						name: `skill:${skill.name}`,
 						description: skill.description,
 						source: "skill",
 						sourceInfo: skill.sourceInfo,
@@ -663,8 +1004,13 @@ export class SessionHost {
 	/**
 	 * Translate the harness's events into extension `ExtensionEvent`s and return the
 	 * teardown fns. See the three-way split documented at the top of the file.
+	 *
+	 * Every handler reads `this.extensionRunner` (the live getter) rather than capturing a
+	 * `runner` argument: the harness outlives a reload but `_extensionRunner` is swapped in
+	 * `buildResources`, so reading the field at event time re-points wiring at the fresh
+	 * runner without re-subscribing.
 	 */
-	private wireExtensionEvents(runner: ExtensionRunner, harness: AgentHarness): (() => void)[] {
+	private wireExtensionEvents(harness: AgentHarness): (() => void)[] {
 		const cwd = getAgentDir(this.options.name);
 		const unsubscribe: (() => void)[] = [];
 
@@ -673,6 +1019,7 @@ export class SessionHost {
 		// ExtensionEvents. message_end is intentionally skipped (see (c)).
 		unsubscribe.push(
 			harness.subscribe(async (event, signal) => {
+				const runner = this.extensionRunner;
 				switch (event.type) {
 					case "agent_start": {
 						this._isStreaming = true;
@@ -804,18 +1151,21 @@ export class SessionHost {
 		// in-place input mutations on tool_call propagate back to the engine).
 		unsubscribe.push(
 			harness.on("tool_call", async (event) => {
+				const runner = this.extensionRunner;
 				if (!runner.hasHandlers("tool_call")) return undefined;
 				return runner.emitToolCall(event as unknown as ToolCallEvent);
 			}),
 		);
 		unsubscribe.push(
 			harness.on("tool_result", async (event) => {
+				const runner = this.extensionRunner;
 				if (!runner.hasHandlers("tool_result")) return undefined;
 				return runner.emitToolResult(event as unknown as ToolResultEvent);
 			}),
 		);
 		unsubscribe.push(
 			harness.on("context", async (event) => {
+				const runner = this.extensionRunner;
 				if (!runner.hasHandlers("context")) return undefined;
 				const messages = await runner.emitContext(event.messages);
 				return { messages };
@@ -823,6 +1173,7 @@ export class SessionHost {
 		);
 		unsubscribe.push(
 			harness.on("before_provider_payload", async (event) => {
+				const runner = this.extensionRunner;
 				// Maps to the extension `before_provider_request` event.
 				if (!runner.hasHandlers("before_provider_request")) return undefined;
 				const payload = await runner.emitBeforeProviderRequest(event.payload);
@@ -831,6 +1182,7 @@ export class SessionHost {
 		);
 		unsubscribe.push(
 			harness.on("before_agent_start", async (event) => {
+				const runner = this.extensionRunner;
 				if (!runner.hasHandlers("before_agent_start")) return undefined;
 				const result = await runner.emitBeforeAgentStart(
 					event.prompt,
@@ -848,6 +1200,7 @@ export class SessionHost {
 		);
 		unsubscribe.push(
 			harness.on("session_before_compact", async (event) => {
+				const runner = this.extensionRunner;
 				if (!runner.hasHandlers("session_before_compact")) return undefined;
 				return runner.emit({
 					type: "session_before_compact",
@@ -864,6 +1217,7 @@ export class SessionHost {
 		// apply in place so agent state + the persisted copy stay one object.
 		unsubscribe.push(
 			harness.onMessageEnd(async (message) => {
+				const runner = this.extensionRunner;
 				if (!runner.hasHandlers("message_end")) return;
 				const replacement = await runner.emitMessageEnd({ type: "message_end", message });
 				if (replacement && replacement !== message) {

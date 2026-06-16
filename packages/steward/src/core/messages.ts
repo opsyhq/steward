@@ -1,12 +1,13 @@
 /**
- * Custom message types and transformers for the coding agent.
+ * Custom message types and transformers for the agent.
  *
- * Extends the base AgentMessage type with coding-agent specific message types,
- * and provides a transformer to convert them to LLM-compatible messages.
+ * Extends the base AgentMessage type with steward's custom message types, and
+ * provides a transformer to convert them to LLM-compatible messages.
  */
 
 import type { ImageContent, Message, TextContent } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@opsyhq/agent";
+import type { BashResult } from "./bash-executor.ts";
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
 
@@ -116,6 +117,24 @@ export function createCompactionSummaryMessage(
 		summary: summary,
 		tokensBefore,
 		timestamp: new Date(timestamp).getTime(),
+	};
+}
+
+export function createBashExecutionMessage(
+	command: string,
+	result: BashResult,
+	options?: { excludeFromContext?: boolean },
+): BashExecutionMessage {
+	return {
+		role: "bashExecution",
+		command,
+		output: result.output,
+		exitCode: result.exitCode,
+		cancelled: result.cancelled,
+		truncated: result.truncated,
+		fullOutputPath: result.fullOutputPath,
+		timestamp: Date.now(),
+		excludeFromContext: options?.excludeFromContext,
 	};
 }
 

@@ -1,7 +1,5 @@
-// Substrate-forced divergence: pi's source-info.ts imports `PathMetadata` from
-// `package-manager.ts`, which steward does not vendor (it drags glob/minimatch/
-// hosted-git-info). The type is inlined here — the only edge to package-manager.ts.
-// skills/loader/prompt-templates use the synthetic variant.
+// PathMetadata is inlined here; skills/loader/prompt-templates use the
+// synthetic variant.
 
 export type SourceScope = "user" | "project" | "temporary";
 export type SourceOrigin = "package" | "top-level";
