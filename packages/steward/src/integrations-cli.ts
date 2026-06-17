@@ -1,12 +1,9 @@
 /**
  * `steward integrations <add|remove|list|configure> <agent> <spec>` CLI.
  *
- * Mirrors coding-agent's `package-manager-cli.ts` shape: a tiny parser, a usage
- * helper, and `runIntegrations` returning a numeric exit code (steward's `main.ts`
- * convention). The CLI owns the per-agent `DefaultPackageManager` (the same package
- * manager that owns extensions/skills/prompts/themes): `add`/`remove` install + persist
- * the package, `list` reads the resolved integration resources. `add` also runs guided
- * setup right after install (on a TTY); `configure` re-runs it — both via the standalone
+ * Over the per-agent `DefaultPackageManager`: `add`/`remove` install + persist the
+ * package, `list` reads the resolved integration resources. `add` also runs guided setup
+ * right after install (on a TTY); `configure` re-runs it — both via the standalone
  * onboarding TUI (no agent session).
  */
 

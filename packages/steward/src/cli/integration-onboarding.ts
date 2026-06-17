@@ -2,11 +2,10 @@
  * Integration onboarding — the CLI-facing runner.
  *
  * `integrations configure <agent> <service>` and the post-install step of
- * `integrations add` both land here. It builds the narrowed `IntegrationOnboardUI` as a
- * plain object literal (the coding-agent `createProjectTrustContext` pattern) wired to
+ * `integrations add` both land here. It builds the narrowed `IntegrationOnboardUI` over
  * the short-lived startup-TUI helpers, then drives the UI-agnostic `onboardIntegration`
- * core once per service. This is a CLI sub-flow (sibling of `startup-ui.ts`), not a
- * session mode — no agent session is started.
+ * core once per service. This is a CLI sub-flow, not a session mode — no agent session
+ * is started.
  *
  * Integration discovery is `resolve()`-based: the per-agent `DefaultPackageManager`
  * resolves the integration half of each configured package in place (no symlinks), and

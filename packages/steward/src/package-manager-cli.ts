@@ -1,13 +1,10 @@
 /**
  * `steward packages <install|remove|update|list> <agent> [source]` CLI.
  *
- * The general package CLI over the per-agent `DefaultPackageManager` — the same package
- * manager that backs `integrations` (and resolves extensions/skills/prompts/themes). It
- * is the faithful steward analogue of coding-agent's `package-manager-cli.ts`, trimmed to
- * steward's per-agent model: there is no project (`-l`/`--local`) scope, no project-trust
- * gating, and no self-update — every package is installed into and persisted under the
- * named agent's home (`~/.steward/agents/<name>`). Returns a numeric exit code (steward's
- * `main.ts` convention) rather than coding-agent's boolean + `process.exitCode`.
+ * The package CLI over the per-agent `DefaultPackageManager` — the same package manager
+ * that backs `integrations` and resolves extensions/skills/prompts/themes. Per-agent
+ * only: no project scope, no trust gating, no self-update; every package is installed
+ * into and persisted under the named agent's home.
  */
 
 import chalk from "chalk";

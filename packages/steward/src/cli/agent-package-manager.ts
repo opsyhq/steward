@@ -1,13 +1,11 @@
 /**
  * Construct a `DefaultPackageManager` bound to one agent's per-agent home.
  *
- * Mirrors coding-agent's `package-manager-cli.ts`, where the CLI owns creating the
- * package manager. Steward's twist is the explicit `<agent>` argument: the agent's home
- * (`~/.steward/agents/<name>`) is BOTH the install root and the settings location, so
- * installs and the persisted `packages[]` land in the per-agent `settings.json` (never
- * the shared dir). `cwd` is the user's shell cwd so relative local sources (e.g.
- * `./examples/...`) resolve from where the command was typed; the package manager
- * normalizes them to agent-relative before persisting, so they round-trip on launch.
+ * The agent's home (`~/.steward/agents/<name>`) is both the install root and the
+ * settings location, so installs and the persisted `packages[]` land in the per-agent
+ * `settings.json`, never the shared dir. `cwd` is the shell cwd so relative local
+ * sources resolve from where the command was typed; they're normalized to
+ * agent-relative before persisting, so they round-trip on launch.
  */
 
 import { getAgentDir } from "../config.ts";
