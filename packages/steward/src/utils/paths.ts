@@ -55,6 +55,27 @@ export function resolvePath(input: string, baseDir: string = process.cwd(), opti
 	return isAbsolute(normalized) ? nodeResolvePath(normalized) : nodeResolvePath(normalizedBaseDir, normalized);
 }
 
+/**
+ * Returns true if the value is NOT a package source (npm:, git:, etc.)
+ * or a remote URL protocol. Bare names, relative paths, and file: URLs
+ * are considered local.
+ */
+export function isLocalPath(value: string): boolean {
+	const trimmed = value.trim();
+	// Known non-local prefixes. file: URLs are local paths and are intentionally resolved by resolvePath().
+	if (
+		trimmed.startsWith("npm:") ||
+		trimmed.startsWith("git:") ||
+		trimmed.startsWith("github:") ||
+		trimmed.startsWith("http:") ||
+		trimmed.startsWith("https:") ||
+		trimmed.startsWith("ssh:")
+	) {
+		return false;
+	}
+	return true;
+}
+
 /** Resolve symlinks to a real path, falling back to the input if that fails. */
 export function canonicalizePath(path: string): string {
 	try {

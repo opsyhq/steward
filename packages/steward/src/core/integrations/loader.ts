@@ -88,7 +88,8 @@ async function loadIntegrationModule(integrationPath: string): Promise<Integrati
 		...(isBunBinary ? { virtualModules: VIRTUAL_MODULES, tryNative: false } : { alias: getAliases() }),
 	});
 
-	const module = await jiti.import(integrationPath, { default: true });
+	const realPath = fs.existsSync(integrationPath) ? fs.realpathSync(integrationPath) : integrationPath;
+	const module = await jiti.import(realPath, { default: true });
 	const factory = module as IntegrationFactory;
 	return typeof factory !== "function" ? undefined : factory;
 }
@@ -181,16 +182,16 @@ export async function loadIntegrations(
 	};
 }
 
-interface PiManifest {
+interface StewardManifest {
 	integrations?: string[];
 }
 
-function readPiManifest(packageJsonPath: string): PiManifest | null {
+function readStewardManifest(packageJsonPath: string): StewardManifest | null {
 	try {
 		const content = fs.readFileSync(packageJsonPath, "utf-8");
 		const pkg = JSON.parse(content);
-		if (pkg.pi && typeof pkg.pi === "object") {
-			return pkg.pi as PiManifest;
+		if (pkg.steward && typeof pkg.steward === "object") {
+			return pkg.steward as StewardManifest;
 		}
 		return null;
 	} catch {
@@ -204,13 +205,13 @@ function isIntegrationFile(name: string): boolean {
 
 /**
  * Resolve integration entry points from a directory:
- *  1. package.json with "pi.integrations" → declared paths
+ *  1. package.json with "steward.integrations" → declared paths
  *  2. index.ts / index.js → the index file
  */
 function resolveIntegrationEntries(dir: string): string[] | null {
 	const packageJsonPath = path.join(dir, "package.json");
 	if (fs.existsSync(packageJsonPath)) {
-		const manifest = readPiManifest(packageJsonPath);
+		const manifest = readStewardManifest(packageJsonPath);
 		if (manifest?.integrations?.length) {
 			const entries: string[] = [];
 			for (const intPath of manifest.integrations) {
@@ -241,7 +242,7 @@ function resolveIntegrationEntries(dir: string): string[] | null {
  * Discover integrations in a directory (one level of nesting):
  *  1. Direct files: `integrations/*.ts` or `*.js`
  *  2. Subdir with index: `integrations/* /index.ts` or `index.js`
- *  3. Subdir with package.json declaring "pi.integrations"
+ *  3. Subdir with package.json declaring "steward.integrations"
  */
 function discoverIntegrationsInDir(dir: string): string[] {
 	if (!fs.existsSync(dir)) {

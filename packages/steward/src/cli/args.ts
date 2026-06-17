@@ -77,6 +77,7 @@ Usage:
   ${APP_NAME} new <name> [--model provider/id]             Create an agent, then start its birth conversation
   ${APP_NAME} list                                         List agents
   ${APP_NAME} delete <name>                                Delete an agent (type-the-name confirm)
+  ${APP_NAME} integrations <add|remove|list|configure> <name> [spec]   Manage an agent's integrations
   ${APP_NAME} <name> [message] [--new] [--print]           Talk to an agent
 
 Options:

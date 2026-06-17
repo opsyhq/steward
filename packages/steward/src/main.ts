@@ -25,6 +25,7 @@ import { ModelRegistry } from "./core/model-registry.ts";
 import { resolveCliModel } from "./core/model-resolver.ts";
 import { SessionHost } from "./core/session-host.ts";
 import { getDefaultModel, getDefaultProvider } from "./core/settings.ts";
+import { runIntegrations } from "./integrations-cli.ts";
 import { InteractiveMode } from "./modes/interactive/interactive-mode.ts";
 import { runPrintMode } from "./modes/print-mode.ts";
 
@@ -38,7 +39,9 @@ const BIRTH_OPENER = "What is my purpose?";
 export async function main(argv: string[]): Promise<number> {
 	const args = parseArgs(argv);
 
-	if (args.help) {
+	// `integrations` owns its own per-subcommand help, so don't let the global --help
+	// intercept swallow `integrations <cmd> --help`.
+	if (args.help && args.positionals[0] !== "integrations") {
 		printHelp();
 		return 0;
 	}
@@ -60,6 +63,7 @@ export async function main(argv: string[]): Promise<number> {
 	if (command === "new") return runNew(rest, args);
 	if (command === "list") return runList();
 	if (command === "delete") return runDelete(rest);
+	if (command === "integrations") return runIntegrations(rest, args.help);
 	return runAgent(command, rest, args);
 }
 

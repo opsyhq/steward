@@ -20,6 +20,8 @@ export type {
 	IntegrationErrorListener,
 	IntegrationFactory,
 	IntegrationHandle,
+	IntegrationOnboardContext,
+	IntegrationOnboardUI,
 	IntegrationRunContext,
 	IntegrationRuntime,
 	IntegrationRuntimeState,

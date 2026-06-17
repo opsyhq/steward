@@ -151,6 +151,8 @@ export {
 	type IntegrationErrorListener,
 	type IntegrationFactory,
 	type IntegrationHandle,
+	type IntegrationOnboardContext,
+	type IntegrationOnboardUI,
 	type IntegrationRunContext,
 	IntegrationRunner,
 	type IntegrationRuntime,
@@ -177,6 +179,11 @@ export {
 	type ResolveCliModelResult,
 	resolveCliModel,
 } from "./core/model-resolver.ts";
+// Config-value resolution (so integration `onboard(ctx)` can type `ctx.resolve`).
+export {
+	resolveConfigValueOrThrow,
+	resolveConfigValueUncached,
+} from "./core/resolve-config-value.ts";
 export {
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
