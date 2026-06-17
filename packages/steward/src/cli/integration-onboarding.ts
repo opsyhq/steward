@@ -7,16 +7,24 @@
  * the short-lived startup-TUI helpers, then drives the UI-agnostic `onboardIntegration`
  * core once per service. This is a CLI sub-flow (sibling of `startup-ui.ts`), not a
  * session mode — no agent session is started.
+ *
+ * Integration discovery is `resolve()`-based: the per-agent `DefaultPackageManager`
+ * resolves the integration half of each configured package in place (no symlinks), and
+ * the loaded `Integration` objects carry the definitions to onboard.
  */
 
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import chalk from "chalk";
-import { getAgentDir, getAgentIntegrationsDir } from "../config.ts";
+import { getAgentDir } from "../config.ts";
 import { IntegrationAccountStorage } from "../core/integration-account-storage.ts";
-import { discoverAndLoadIntegrations } from "../core/integrations/loader.ts";
+import { loadIntegrations } from "../core/integrations/loader.ts";
 import { onboardIntegration } from "../core/integrations/onboarding.ts";
 import type { Integration, IntegrationOnboardUI } from "../core/integrations/types.ts";
+import type { DefaultPackageManager } from "../core/package-manager.ts";
 import { SettingsManager } from "../core/settings-manager.ts";
+import { resolvePath } from "../utils/paths.ts";
+import { createAgentPackageManager } from "./agent-package-manager.ts";
 import { showStartupCustom, showStartupInput, showStartupSelector } from "./startup-ui.ts";
 
 /** Build the narrowed onboarding UI over the standalone startup-TUI helpers. */
@@ -49,17 +57,37 @@ function createOnboardUi(settingsManager: SettingsManager): IntegrationOnboardUI
 	};
 }
 
-/** Discover integrations once, select services to onboard, then drive each through onboarding. */
+function isUnder(target: string, root: string): boolean {
+	const t = resolve(target);
+	const r = resolve(root);
+	if (t === r) return true;
+	return t.startsWith(r.endsWith(sep) ? r : `${r}${sep}`);
+}
+
+/** Resolve the install root of a just-installed source (for package-scoped onboarding). */
+function packageRootForSpec(packageManager: DefaultPackageManager, spec: string): string | undefined {
+	// npm/git managed installs resolve cwd-independently; a local source resolves against
+	// the shell cwd where `add` was invoked.
+	const installed = packageManager.getInstalledPath(spec);
+	if (installed) return installed;
+	const local = resolvePath(spec, process.cwd());
+	return existsSync(local) ? local : undefined;
+}
+
+/** Resolve + load the integrations configured for an agent, then drive selected services through onboarding. */
 async function runOnboarding(
 	agentName: string,
-	selectServices: (integrations: Integration[]) => string[],
+	selectServices: (input: { integrations: Integration[]; packageManager: DefaultPackageManager }) => string[],
 ): Promise<number> {
 	const agentDir = getAgentDir(agentName);
-	const { integrations, errors } = await discoverAndLoadIntegrations([], agentDir, agentDir);
+	const { packageManager } = createAgentPackageManager(agentName);
+	const resolved = await packageManager.resolve();
+	const integrationPaths = resolved.integrations.filter((r) => r.enabled).map((r) => r.path);
+	const { integrations, errors } = await loadIntegrations(integrationPaths, agentDir);
 	for (const e of errors) {
 		console.error(chalk.yellow(`Warning: ${e.error}`));
 	}
-	const services = selectServices(integrations);
+	const services = selectServices({ integrations, packageManager });
 	if (services.length === 0) {
 		console.log(chalk.dim("No guided setup available for this integration."));
 		return 0;
@@ -71,7 +99,7 @@ async function runOnboarding(
 
 	let exit = 0;
 	for (const service of services) {
-		const result = await onboardIntegration({ service, integrations, accounts, ui, agentDir });
+		const result = await onboardIntegration({ service, integrations, accounts, ui });
 		switch (result.status) {
 			case "connected":
 				console.log(chalk.green(`${service} connected.`));
@@ -103,16 +131,16 @@ export function runIntegrationOnboarding(agentName: string, service: string): Pr
 }
 
 /**
- * Post-install onboarding for `integrations add`: onboard every service the just-installed
- * package declares that has an `onboard(ctx)`. The package is the integration(s) whose
- * `resolvedPath` lives under the new `<agentDir>/integrations/<linkName>` symlink.
+ * Post-install onboarding for `integrations add`: onboard every service declared by the
+ * just-installed package that has an `onboard(ctx)`. The package is identified by its
+ * install root — the integrations whose resolved path lives under it.
  */
-export function runOnboardForInstalledPackage(agentName: string, linkName: string): Promise<number> {
-	const prefix = join(getAgentIntegrationsDir(agentName), linkName);
-	return runOnboarding(agentName, (integrations) => {
+export function runOnboardForInstalledPackage(agentName: string, spec: string): Promise<number> {
+	return runOnboarding(agentName, ({ integrations, packageManager }) => {
+		const root = packageRootForSpec(packageManager, spec);
 		const services: string[] = [];
 		for (const integration of integrations) {
-			if (!integration.resolvedPath.startsWith(prefix)) continue;
+			if (root && !isUnder(integration.resolvedPath, root)) continue;
 			for (const [service, config] of integration.definitions) {
 				if (config.onboard) services.push(service);
 			}

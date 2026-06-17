@@ -9,6 +9,7 @@ import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve as nodeResolvePath, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnProcessSync } from "./child-process.ts";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 
@@ -99,4 +100,26 @@ export function getCwdRelativePath(filePath: string, cwd: string): string | unde
 export function formatPathRelativeToCwdOrAbsolute(filePath: string, cwd: string): string {
 	const absolutePath = resolvePath(filePath, cwd);
 	return (getCwdRelativePath(absolutePath, cwd) ?? absolutePath).split(sep).join("/");
+}
+
+/**
+ * Mark a path as ignored by cloud-sync providers (Dropbox / iCloud File Provider).
+ * Managed package install dirs (`<agentDir>/npm`, `<agentDir>/git`) carry large
+ * `node_modules` trees that should not be synced. Best-effort: failures are silent.
+ */
+export function markPathIgnoredByCloudSync(path: string): void {
+	const attrs =
+		process.platform === "darwin"
+			? ["com.dropbox.ignored", "com.apple.fileprovider.ignore#P"]
+			: process.platform === "linux"
+				? ["user.com.dropbox.ignored"]
+				: [];
+
+	for (const attr of attrs) {
+		if (process.platform === "darwin") {
+			spawnProcessSync("xattr", ["-w", attr, "1", path], { encoding: "utf-8", stdio: "ignore" });
+		} else {
+			spawnProcessSync("setfattr", ["-n", attr, "-v", "1", path], { encoding: "utf-8", stdio: "ignore" });
+		}
+	}
 }

@@ -142,7 +142,6 @@ export {
 // Integration system
 export {
 	createIntegrationRuntime,
-	discoverAndLoadIntegrations,
 	type Integration,
 	type IntegrationAction,
 	type IntegrationActionContext,

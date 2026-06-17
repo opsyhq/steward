@@ -3,17 +3,18 @@
  *
  * Mirrors coding-agent's `package-manager-cli.ts` shape: a tiny parser, a usage
  * helper, and `runIntegrations` returning a numeric exit code (steward's `main.ts`
- * convention). `add`/`remove`/`list` drive `DefaultIntegrationPackageManager`. `add`
- * also runs guided setup right after install (on a TTY); `configure` re-runs it — both
- * via the standalone onboarding TUI (no agent session).
+ * convention). The CLI owns the per-agent `DefaultPackageManager` (the same package
+ * manager that owns extensions/skills/prompts/themes): `add`/`remove` install + persist
+ * the package, `list` reads the resolved integration resources. `add` also runs guided
+ * setup right after install (on a TTY); `configure` re-runs it — both via the standalone
+ * onboarding TUI (no agent session).
  */
 
 import chalk from "chalk";
+import { createAgentPackageManager } from "./cli/agent-package-manager.ts";
 import { runIntegrationOnboarding, runOnboardForInstalledPackage } from "./cli/integration-onboarding.ts";
 import { APP_NAME, getAgentDir } from "./config.ts";
 import { agentExists } from "./core/agent-config.ts";
-import { DefaultIntegrationPackageManager } from "./core/integrations/integration-package-manager.ts";
-import { SettingsManager } from "./core/settings-manager.ts";
 
 /** Guided setup mounts a TUI, so it only runs on an interactive terminal. */
 function isInteractiveTerminal(): boolean {
@@ -51,8 +52,8 @@ function printIntegrationsCommandHelp(command: IntegrationsCommand): void {
 	switch (command) {
 		case "add":
 			console.log(`Install a self-contained integration package into an agent, then run its
-guided setup. The package brings its own dependencies; a symlink under
-<agent>/integrations/ makes it discoverable on the next launch.
+guided setup. The package brings its own dependencies and is resolved in place
+from its install on the next launch.
 
 Sources:
   npm:    ${APP_NAME} integrations add <agent> npm:@scope/pkg
@@ -61,8 +62,8 @@ Sources:
 `);
 			return;
 		case "remove":
-			console.log(`Remove an installed integration. The discovery symlink is unlinked; the
-backing dir is reclaimed only for managed (npm/git) sources — a local install's
+			console.log(`Remove an installed integration and its source from the agent's settings.
+The backing dir is reclaimed only for managed (npm/git) sources — a local install's
 source is left untouched.
 `);
 			return;
@@ -125,13 +126,6 @@ function resolveAgent(
 	return { agent, agentDir: getAgentDir(agent) };
 }
 
-function createPackageManager(agentDir: string): DefaultIntegrationPackageManager {
-	// Global settings (npmCommand override) live in the shared agent dir, which is the
-	// SettingsManager's default agentDir; cwd only feeds project settings (unused here).
-	const settingsManager = SettingsManager.create(agentDir);
-	return new DefaultIntegrationPackageManager({ agentDir, settingsManager });
-}
-
 export async function runIntegrations(rest: string[], help = false): Promise<number> {
 	const options = parseIntegrationsCommand(rest);
 	if (!options) {
@@ -163,7 +157,7 @@ export async function runIntegrations(rest: string[], help = false): Promise<num
 	if ("error" in resolved) {
 		return resolved.error;
 	}
-	const { agent, agentDir } = resolved;
+	const { agent } = resolved;
 
 	switch (options.command) {
 		case "add": {
@@ -172,22 +166,20 @@ export async function runIntegrations(rest: string[], help = false): Promise<num
 				console.error(chalk.dim(`Usage: ${usage}`));
 				return 1;
 			}
-			const pm = createPackageManager(agentDir);
-			let name: string;
+			const { packageManager } = createAgentPackageManager(agent);
 			try {
 				console.log(chalk.dim(`Installing ${options.spec}...`));
-				const installed = await pm.install(options.spec);
-				name = installed.name;
-				console.log(chalk.green(`Installed integration "${name}".`));
+				await packageManager.installAndPersist(options.spec);
+				console.log(chalk.green(`Installed ${options.spec}`));
 			} catch (error) {
 				console.error(chalk.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
 				return 1;
 			}
 			// Flow straight into guided setup when interactive; otherwise tell the user how.
 			if (isInteractiveTerminal()) {
-				return runOnboardForInstalledPackage(agent, name);
+				return runOnboardForInstalledPackage(agent, options.spec);
 			}
-			console.log(chalk.dim(`Run "${APP_NAME} integrations configure ${agent} ${name}" to set it up.`));
+			console.log(chalk.dim(`Run "${APP_NAME} integrations configure ${agent} <service>" to set it up.`));
 			return 0;
 		}
 
@@ -197,9 +189,9 @@ export async function runIntegrations(rest: string[], help = false): Promise<num
 				console.error(chalk.dim(`Usage: ${usage}`));
 				return 1;
 			}
-			const pm = createPackageManager(agentDir);
+			const { packageManager } = createAgentPackageManager(agent);
 			try {
-				const removed = await pm.remove(options.spec);
+				const removed = await packageManager.removeAndPersist(options.spec);
 				if (!removed) {
 					console.error(chalk.red(`No matching integration found for ${options.spec}`));
 					return 1;
@@ -213,16 +205,17 @@ export async function runIntegrations(rest: string[], help = false): Promise<num
 		}
 
 		case "list": {
-			const pm = createPackageManager(agentDir);
-			const installed = pm.list();
-			if (installed.length === 0) {
+			const { packageManager } = createAgentPackageManager(agent);
+			const resolvedPaths = await packageManager.resolve();
+			const integrations = resolvedPaths.integrations.filter((r) => r.enabled);
+			if (integrations.length === 0) {
 				console.log(chalk.dim("No integrations installed."));
 				return 0;
 			}
 			console.log(chalk.bold("Installed integrations:"));
-			for (const entry of installed) {
-				console.log(`  ${entry.name}  ${chalk.dim(`(${entry.source})`)}`);
-				console.log(chalk.dim(`    ${entry.dir}`));
+			for (const entry of integrations) {
+				console.log(`  ${entry.metadata.source}`);
+				console.log(chalk.dim(`    ${entry.path}`));
 			}
 			return 0;
 		}

@@ -26,6 +26,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { basename, dirname } from "node:path";
 import type { Api, AssistantMessage, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
 import {
 	type AgentHarness,
@@ -45,7 +46,6 @@ import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { type AgentConfig, isDeployed, loadAgentConfig } from "./agent-config.ts";
 import type { AuthStorage } from "./auth-storage.ts";
 import type { ResourceDiagnostic, ResourceSummary } from "./diagnostics.ts";
-import { discoverAndLoadExtensions } from "./extensions/loader.ts";
 import { type ExtensionErrorListener, ExtensionRunner, emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type {
 	ContextUsage,
@@ -60,18 +60,19 @@ import type {
 	ToolResultEvent,
 } from "./extensions/types.ts";
 import type { IntegrationAccountStorage } from "./integration-account-storage.ts";
-import { discoverAndLoadIntegrations } from "./integrations/loader.ts";
 import { IntegrationRunner } from "./integrations/runner.ts";
 import { loadMemory } from "./memory.ts";
 import { createCustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
-import { loadPromptTemplates, type PromptTemplate, parseCommandArgs } from "./prompt-templates.ts";
+import { type PromptTemplate, parseCommandArgs } from "./prompt-templates.ts";
+import { DefaultResourceLoader } from "./resource-loader.ts";
 import { createAgentSession } from "./sdk.ts";
 import { openAgentSession } from "./session.ts";
 import { SessionManager } from "./session-manager.ts";
-import { loadSkills, type Skill } from "./skills.ts";
+import { SettingsManager } from "./settings-manager.ts";
+import type { Skill } from "./skills.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
-import { createSyntheticSourceInfo } from "./source-info.ts";
+import { createSyntheticSourceInfo, type PathMetadata } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { createDeployTool } from "./tools/deploy.ts";
 // File tools live under tools/. memory is steward's own curated-notes tool; the
@@ -185,6 +186,26 @@ function contentToImages(content: string | (TextContent | ImageContent)[]): Imag
 	if (typeof content === "string") return undefined;
 	const images = content.filter((c): c is ImageContent => c.type === "image");
 	return images.length > 0 ? images : undefined;
+}
+
+/** A stable `extension:<name>` label for the extension that contributed a resource. */
+function getExtensionSourceLabel(extensionPath: string): string {
+	if (extensionPath.startsWith("<")) {
+		return `extension:${extensionPath.replace(/[<>]/g, "")}`;
+	}
+	const base = basename(extensionPath);
+	const name = base.replace(/\.(ts|js)$/, "");
+	return `extension:${name}`;
+}
+
+/**
+ * Source metadata for an extension-contributed skill/prompt path (fed to the resource
+ * loader via `extendResources`). Attributed to the contributing extension and marked
+ * `temporary` (re-derived each load), with the extension's own dir as `baseDir`.
+ */
+function contributedResourceMetadata(extensionPath: string): PathMetadata {
+	const baseDir = extensionPath.startsWith("<") ? undefined : dirname(extensionPath);
+	return { source: getExtensionSourceLabel(extensionPath), scope: "temporary", origin: "top-level", baseDir };
 }
 
 export class SessionHost {
@@ -754,40 +775,47 @@ export class SessionHost {
 		errors: { path: string; error: string }[];
 	}> {
 		const { config, agentDir, name, sessionManager, modelRegistry, discoverReason, seedFlagValues } = params;
-
-		// Discover + load extensions, then build the runner. Steward scopes extensions
-		// per-agent: they are discovered from the agent's own `<agentDir>/extensions/` dir.
-		// There is no project-local extension concept — each agent owns its extensions, and
-		// the shared dir is the account store, not an extension home. cwd is the agent dir
-		// (used only as the runtime cwd and to resolve explicitly configured paths).
-		// Discover + load integrations and build their runner BEFORE extensions, so the
-		// extension loader can wire `getIntegration` at extension-load time. This ordering
-		// is load-bearing. The account store is process-scoped (survives reload).
-		const {
-			integrations,
-			errors: integrationErrors,
-			runtime: integrationRuntime,
-		} = await discoverAndLoadIntegrations([], agentDir, agentDir);
 		const integrationAccounts = this.options.integrationAccounts;
-		const integrationRunner = new IntegrationRunner(integrations, integrationRuntime, agentDir, integrationAccounts);
+
+		// One resource loader owns npm/git/local install + resolution and resolves extensions
+		// AND integrations in place from the same per-agent home (cwd = agentDir; there is no
+		// project-local resource concept — each agent owns its resources under its home). It
+		// builds the *unbound* IntegrationRunner via the hook below (which the loader threads
+		// into the extension loader so extensions wire `getIntegration` at load time); this
+		// host keeps the runner's stop-before-start lifecycle (see build()/reload()). The
+		// integration arm resolves BEFORE the extension arm inside reload(). The account store
+		// is process-scoped (survives reload).
+		const settingsManager = SettingsManager.create(agentDir, agentDir);
+		const loader = new DefaultResourceLoader({
+			cwd: agentDir,
+			agentDir,
+			settingsManager,
+			// The interactive mode owns theme + context-file loading; the host only needs
+			// extensions/integrations/skills/prompts from the loader.
+			noThemes: true,
+			noContextFiles: true,
+		});
+		await loader.reload({
+			buildIntegrationRunner: ({ integrations, runtime }) =>
+				new IntegrationRunner(integrations, runtime, agentDir, integrationAccounts),
+		});
+
+		const integrationRunner = loader.getIntegrationRunner();
+		if (!integrationRunner) {
+			throw new Error("Resource loader did not build an integration runner");
+		}
 		this._integrationRunner = integrationRunner;
 		// Surface integration load failures + account-store parse failures (e.g. a malformed
 		// integrations.json that would otherwise silently yield zero accounts) through the
 		// resource-summary diagnostics path, alongside the extension load errors below.
 		this._integrationLoadErrors = [
-			...integrationErrors,
+			...loader.getIntegrations().errors,
 			...integrationAccounts
 				.drainErrors()
 				.map((error) => ({ path: getAgentIntegrationsPath(name), error: error.message })),
 		];
 
-		const { extensions, errors, runtime } = await discoverAndLoadExtensions(
-			[],
-			agentDir,
-			agentDir,
-			undefined,
-			integrationRunner,
-		);
+		const { extensions, errors, runtime } = loader.getExtensions();
 		const runner = new ExtensionRunner(extensions, runtime, agentDir, sessionManager, modelRegistry);
 		this._extensionRunner = runner;
 		this._extensionCount = extensions.length;
@@ -803,26 +831,27 @@ export class SessionHost {
 			runner.emitError({ extensionPath: path, event: "load", error });
 		}
 
-		// Let extensions contribute additional skill/prompt/theme paths before the
-		// prompt is frozen. Fires after the runner exists.
+		// Let extensions contribute additional skill/prompt paths before the prompt is
+		// frozen, then re-resolve skills/prompts through the loader so the contributed paths
+		// merge with the auto-discovered + package-resolved ones. Fires after the runner exists.
 		const discovered = await runner.emitResourcesDiscover(agentDir, discoverReason);
+		loader.extendResources({
+			skillPaths: discovered.skillPaths.map((s) => ({
+				path: s.path,
+				metadata: contributedResourceMetadata(s.extensionPath),
+			})),
+			promptPaths: discovered.promptPaths.map((p) => ({
+				path: p.path,
+				metadata: contributedResourceMetadata(p.extensionPath),
+			})),
+		});
 
 		// Read curated files ONCE and freeze them into the prompt. Mid-session edits
 		// (memory tool / file tools) persist to disk but only enter the prompt next session.
 		const { soul, memory, user } = loadMemory(name);
-		const { skills, diagnostics: skillDiagnostics } = loadSkills({
-			cwd: agentDir,
-			agentDir,
-			skillPaths: discovered.skillPaths.map((s) => s.path),
-			includeDefaults: true,
-		});
+		const { skills, diagnostics: skillDiagnostics } = loader.getSkills();
 		this._skillDiagnostics = skillDiagnostics;
-		const promptTemplates = loadPromptTemplates({
-			cwd: agentDir,
-			agentDir,
-			promptPaths: discovered.promptPaths.map((p) => p.path),
-			includeDefaults: true,
-		});
+		const promptTemplates = loader.getPrompts().prompts;
 		this._skills = skills;
 		this._promptTemplates = promptTemplates;
 

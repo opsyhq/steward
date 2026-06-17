@@ -78,6 +78,7 @@ Usage:
   ${APP_NAME} list                                         List agents
   ${APP_NAME} delete <name>                                Delete an agent (type-the-name confirm)
   ${APP_NAME} integrations <add|remove|list|configure> <name> [spec]   Manage an agent's integrations
+  ${APP_NAME} packages <install|remove|update|list> <name> [source]    Manage an agent's packages
   ${APP_NAME} <name> [message] [--new] [--print]           Talk to an agent
 
 Options:

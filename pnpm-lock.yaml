@@ -165,6 +165,9 @@ importers:
       diff:
         specifier: 8.0.4
         version: 8.0.4
+      glob:
+        specifier: 13.0.6
+        version: 13.0.6
       highlight.js:
         specifier: 10.7.3
         version: 10.7.3
@@ -177,6 +180,9 @@ importers:
       jiti:
         specifier: 2.7.0
         version: 2.7.0
+      minimatch:
+        specifier: 10.2.5
+        version: 10.2.5
       proper-lockfile:
         specifier: 4.1.2
         version: 4.1.2
