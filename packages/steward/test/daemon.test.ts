@@ -1,5 +1,5 @@
 /**
- * Daemon mode (HTTP/SSE server) integration — against a REAL `SessionHost` + a faux pi-ai
+ * Daemon mode (HTTP/SSE server) integration — against a REAL `SessionHost` + a faux
  * provider (no network), so the whole transport runs: bearer auth, the `POST /control`
  * command switch, the curated `GET /events` SSE stream, `Last-Event-ID` replay, and the
  * rebind-on-`new_session` re-subscribe.
@@ -253,7 +253,6 @@ describe("daemon HTTP/SSE server", () => {
 			pendingMessageCount: 0,
 		});
 		expect(res.data.model).toBeDefined();
-		// Session identity is surfaced (mirrors pi's RpcSessionState).
 		expect(typeof res.data.sessionId).toBe("string");
 		expect(res.data.sessionId.length).toBeGreaterThan(0);
 		expect(typeof res.data.sessionFile).toBe("string");

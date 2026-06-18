@@ -746,9 +746,8 @@ export class SessionHost {
 
 	/**
 	 * Resolve a model by `{provider, modelId}` off the encapsulated registry and switch the
-	 * live harness to it. Guards on `hasConfiguredAuth` (mirrors the extension `setModel`
-	 * guard), throwing on an unknown or unauthenticated model. Keeps the registry private —
-	 * the daemon only ever holds the wire `{provider, modelId}` pair.
+	 * live harness to it. Throws on an unknown or unauthenticated model. Keeps the registry
+	 * private — the daemon only ever holds the wire `{provider, modelId}` pair.
 	 */
 	async setModelById(provider: string, modelId: string): Promise<Model<Api>> {
 		if (!this._modelRegistry) throw new Error("SessionHost not started.");

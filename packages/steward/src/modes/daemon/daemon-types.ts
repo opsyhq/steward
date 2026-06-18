@@ -61,11 +61,7 @@ export type DaemonResponse =
 // Session state (get_state / hello snapshot)
 // ============================================================================
 
-/**
- * The `get_state` / `hello` snapshot — pi's `RpcSessionState` minus the fields steward's
- * `SessionHost` has no backing state for (`isCompacting`, `steeringMode`, `followUpMode`,
- * `autoCompactionEnabled`).
- */
+/** The `get_state` / `hello` snapshot. */
 export interface DaemonSessionState {
 	model?: Model<Api>;
 	thinkingLevel: ThinkingLevel;
