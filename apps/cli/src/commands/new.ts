@@ -1,0 +1,36 @@
+/**
+ * `new <name>` — create an agent, then drop into its birth conversation.
+ *
+ * Allocates the agent's stable loopback port (persisted into agent.json) so its daemon prefers a
+ * fixed port across restarts, creates the home tree, then opens a daemon client and runs the
+ * interactive birth session seeded with the opener. Birth is daemon-first: abandoning a forming
+ * agent leaves only a temp descriptor + a detached daemon that idles out — no OS service unit
+ * (those land only at deploy).
+ */
+
+import { agentExists, allocateStablePort, APP_NAME, createAgent } from "@opsyhq/steward";
+import { DaemonSession } from "../daemon-session.ts";
+import { InteractiveMode } from "../modes/interactive/interactive-mode.ts";
+
+// A newly born agent opens the chat itself, asking its human what it is for.
+const BIRTH_OPENER = "What is my purpose?";
+
+export async function runNew(positionals: string[], model?: string): Promise<number> {
+	const name = positionals[0];
+	if (!name || positionals.length > 1) {
+		process.stderr.write(`Usage: ${APP_NAME} new <name>\n`);
+		return 1;
+	}
+	if (agentExists(name)) {
+		process.stderr.write(`Agent "${name}" already exists.\n`);
+		return 1;
+	}
+
+	const port = await allocateStablePort();
+	const config = createAgent({ name, model, port });
+	process.stdout.write(`Created agent "${config.name}".\n`);
+
+	const session = await DaemonSession.open(name);
+	await new InteractiveMode(session, { initialAssistantMessage: BIRTH_OPENER }).run();
+	return 0;
+}

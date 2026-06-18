@@ -7,6 +7,7 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { type Static, Type } from "typebox";
 import { Compile } from "typebox/compile";
 import {
@@ -94,16 +95,37 @@ export function listAgents(): AgentConfig[] {
 	return configs;
 }
 
+/**
+ * Allocate a free loopback port by binding `:0`, reading the OS-assigned port, then releasing it.
+ * Stamped into `agent.json.port` at `new` so the agent's daemon prefers a stable port across
+ * restarts (the durable identity clients attach to). Inherently racy — the port is free when
+ * bound here but could be taken before the daemon binds it — so the daemon treats it as a
+ * preference and falls back to an OS-assigned port (written back into the descriptor) on conflict.
+ */
+export function allocateStablePort(): Promise<number> {
+	return new Promise((resolve, reject) => {
+		const server = createServer();
+		server.on("error", reject);
+		server.listen(0, "127.0.0.1", () => {
+			const address = server.address();
+			const port = typeof address === "object" && address ? address.port : 0;
+			server.close((err) => (err ? reject(err) : resolve(port)));
+		});
+	});
+}
+
 export interface CreateAgentOptions {
 	name: string;
 	/** Optional at birth — left empty until the agent authors its own purpose via the deploy tool. Defaults to "". */
 	purpose?: string;
 	model?: string;
+	/** The stable loopback port for the agent's daemon — see `allocateStablePort`. Omitted → OS-assigned. */
+	port?: number;
 }
 
 /** Create an agent's home tree (`agent.json`, empty memory files, sessions/, workspace/). */
 export function createAgent(options: CreateAgentOptions): AgentConfig {
-	const { name, purpose, model } = options;
+	const { name, purpose, model, port } = options;
 	if (!isValidAgentName(name)) {
 		throw new Error(
 			`Invalid agent name "${name}". Use lowercase letters, digits, and hyphens (must start with a letter or digit).`,
@@ -123,6 +145,7 @@ export function createAgent(options: CreateAgentOptions): AgentConfig {
 		purpose: purpose ?? "",
 		createdAt: new Date().toISOString(),
 		...(model ? { model } : {}),
+		...(port ? { port } : {}),
 		deployedAt: null,
 	};
 	saveAgentConfig(name, config);
