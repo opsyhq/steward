@@ -91,6 +91,64 @@ export interface DaemonSessionState {
 }
 
 // ============================================================================
+// Extension UI (the extension-UI round-trip — Item 5)
+// ============================================================================
+
+/**
+ * A UI request emitted by an extension running in the daemon. Pushed as an SSE frame — NOT
+ * an `AgentHarnessEvent`, so it is excluded from the `Last-Event-ID` replay ring and carries
+ * no SSE `id` (a reconnect must never re-prompt a since-resolved dialog). The interactive
+ * client renders the matching dialog/widget; the 4 dialog arms (`select`/`confirm`/`input`/
+ * `editor`) expect an `ExtensionUIResponse` back via `POST /ui-response`, the rest are
+ * fire-and-forget.
+ *
+ * Ported from coding-agent `rpc-types.ts`; the `setEditorText` arm is normalized to camelCase
+ * (pi's wire value was the snake-case `set_editor_text`) so all nine arms share one convention.
+ */
+export type ExtensionUIRequest =
+	| { type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; timeout?: number }
+	| { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number }
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "input";
+			title: string;
+			placeholder?: string;
+			timeout?: number;
+	  }
+	| { type: "extension_ui_request"; id: string; method: "editor"; title: string; prefill?: string }
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "notify";
+			message: string;
+			notifyType?: "info" | "warning" | "error";
+	  }
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "setStatus";
+			statusKey: string;
+			statusText: string | undefined;
+	  }
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "setWidget";
+			widgetKey: string;
+			widgetLines: string[] | undefined;
+			widgetPlacement?: "aboveEditor" | "belowEditor";
+	  }
+	| { type: "extension_ui_request"; id: string; method: "setTitle"; title: string }
+	| { type: "extension_ui_request"; id: string; method: "setEditorText"; text: string };
+
+/** The client's answer to a dialog `ExtensionUIRequest`, posted to `POST /ui-response`. */
+export type ExtensionUIResponse =
+	| { type: "extension_ui_response"; id: string; value: string }
+	| { type: "extension_ui_response"; id: string; confirmed: boolean }
+	| { type: "extension_ui_response"; id: string; cancelled: true };
+
+// ============================================================================
 // Events (GET /events SSE) — the curated forwarded union
 // ============================================================================
 

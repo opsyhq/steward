@@ -49,6 +49,7 @@ import {
 	type ExtensionShortcut,
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
+	type ExtensionUIRequest,
 	type ExtensionWidgetOptions,
 	FooterDataProvider,
 	getAvailableThemesWithPaths,
@@ -73,7 +74,7 @@ import {
 	type TruncationResult,
 	type WorkingIndicatorOptions,
 } from "@opsyhq/steward";
-import { DaemonSession, type DaemonUiRequest } from "../../daemon-session.ts";
+import { DaemonSession } from "../../daemon-session.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
@@ -270,7 +271,9 @@ export class InteractiveMode {
 		this.subscribeToHost();
 		// The extension runner lives server-side now, so its UI requests arrive over the wire:
 		// route the daemon's extension_ui_request stream to the client dialogs (Slice 4 / Item 5).
-		this.session.onUiRequest = (req) => this.dispatchUiRequest(req);
+		this.session.onUiRequest = (req) => {
+			void this.dispatchUiRequest(req);
+		};
 		this.setupExtensionShortcuts();
 		this.removeInputListener = this.ui.addInputListener((data) => this.handleGlobalInput(data));
 
@@ -1230,13 +1233,49 @@ export class InteractiveMode {
 
 	/**
 	 * Client half of the extension-UI round-trip (Item 5): a daemon `extension_ui_request` is
-	 * dispatched to the matching local dialog, then answered via `this.session.respondUi`. The
-	 * daemon-side bridge (`DaemonUIContext` + `POST /ui-response`) lands in Slice 4, so no request
-	 * arrives until then; this stub keeps the wiring in place.
+	 * dispatched to the matching local dialog/widget. The four dialog methods round-trip — the
+	 * answer goes back via `this.session.respondUi(id, …)`; the rest apply to the TUI and need no
+	 * response (fire-and-forget). The dialog/widget methods are the same ones the in-process
+	 * `createExtensionUIContext` wired before the runner moved server-side.
 	 */
-	private dispatchUiRequest(_req: DaemonUiRequest): void {
-		// Slice 4 (Item 5) fleshes this out: switch on req.method → showExtensionSelector/Input/Editor
-		// (and the fire-and-forget setStatus/setWidget/... family) → this.session.respondUi(id, answer).
+	private async dispatchUiRequest(req: ExtensionUIRequest): Promise<void> {
+		switch (req.method) {
+			case "select": {
+				const value = await this.showExtensionSelector(req.title, req.options, { timeout: req.timeout });
+				await this.session.respondUi(req.id, value === undefined ? { cancelled: true } : { value });
+				return;
+			}
+			case "confirm": {
+				const confirmed = await this.showExtensionConfirm(req.title, req.message, { timeout: req.timeout });
+				await this.session.respondUi(req.id, { confirmed });
+				return;
+			}
+			case "input": {
+				const value = await this.showExtensionInput(req.title, req.placeholder, { timeout: req.timeout });
+				await this.session.respondUi(req.id, value === undefined ? { cancelled: true } : { value });
+				return;
+			}
+			case "editor": {
+				const value = await this.showExtensionEditor(req.title, req.prefill);
+				await this.session.respondUi(req.id, value === undefined ? { cancelled: true } : { value });
+				return;
+			}
+			case "notify":
+				this.showExtensionNotify(req.message, req.notifyType);
+				return;
+			case "setStatus":
+				this.setExtensionStatus(req.statusKey, req.statusText);
+				return;
+			case "setWidget":
+				this.setExtensionWidget(req.widgetKey, req.widgetLines, { placement: req.widgetPlacement });
+				return;
+			case "setTitle":
+				this.ui.terminal.setTitle(req.title);
+				return;
+			case "setEditorText":
+				this.editor.setText(req.text);
+				return;
+		}
 	}
 
 	/** The UI surface handed to extensions via `ctx.ui`. */

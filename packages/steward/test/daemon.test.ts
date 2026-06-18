@@ -415,3 +415,52 @@ describe("daemon client-support verbs (Slice 0)", () => {
 		expect(isDeployed(loadAgentConfig(AGENT))).toBe(true);
 	});
 });
+
+describe("daemon extension-UI bridge (Slice 4)", () => {
+	it("binds a live UI context so extensions can drive dialogs (hasUI)", async () => {
+		await startDaemon();
+		// noOpUIContext → hasUI() is false; the daemon now binds a real DaemonUIContext.
+		expect(activeHost?.extensionRunner.hasUI()).toBe(true);
+	});
+
+	it("rejects /ui-response without the bearer token", async () => {
+		await startDaemon();
+		const res = await fetch(`${baseUrl()}/ui-response`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ type: "extension_ui_response", id: "x", cancelled: true }),
+		});
+		expect(res.status).toBe(401);
+		await res.text();
+	});
+
+	it("round-trips a select dialog over SSE + POST /ui-response, with no replayable id", async () => {
+		await startDaemon();
+		const client = newSse();
+		await client.connect(`${baseUrl()}/events`, { token: TOKEN });
+		await client.waitFor((e) => e.event === "hello");
+
+		// Drive the bound UI context exactly as an extension running in the daemon would.
+		const ui = activeHost?.extensionRunner.getUIContext();
+		if (!ui) throw new Error("daemon UI context not bound");
+		const selection = ui.select("Pick one", ["alpha", "beta"]);
+
+		const frame = await client.waitFor((e) => dataType(e) === "extension_ui_request");
+		const req = JSON.parse(frame.data) as { id: string; method: string; options: string[] };
+		expect(req.method).toBe("select");
+		expect(req.options).toEqual(["alpha", "beta"]);
+		// A UI request is not a harness event: it carries no SSE `id`, so a Last-Event-ID reconnect
+		// never replays (re-prompts) a since-resolved dialog.
+		expect(frame.id).toBeUndefined();
+
+		const res = await fetch(`${baseUrl()}/ui-response`, {
+			method: "POST",
+			headers: { "content-type": "application/json", Authorization: `Bearer ${TOKEN}` },
+			body: JSON.stringify({ type: "extension_ui_response", id: req.id, value: "beta" }),
+		});
+		expect(res.status).toBe(200);
+		await res.text();
+
+		expect(await selection).toBe("beta");
+	});
+});
