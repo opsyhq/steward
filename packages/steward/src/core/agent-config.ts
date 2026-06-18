@@ -97,10 +97,10 @@ export function listAgents(): AgentConfig[] {
 
 /**
  * Allocate a free loopback port by binding `:0`, reading the OS-assigned port, then releasing it.
- * Stamped into `agent.json.port` at `new` so the agent's daemon prefers a stable port across
- * restarts (the durable identity clients attach to). Inherently racy — the port is free when
- * bound here but could be taken before the daemon binds it — so the daemon treats it as a
- * preference and falls back to an OS-assigned port (written back into the descriptor) on conflict.
+ * Stamped into `agent.json.port` at `new`: a deployed agent's daemon binds this stable port (the
+ * durable identity clients attach to). The allocation is inherently racy — the port is free here but
+ * could be taken by the time a deployed daemon binds it, which simply fails the bind; a forming agent
+ * avoids the race entirely by binding an OS-assigned ephemeral port.
  */
 export function allocateStablePort(): Promise<number> {
 	return new Promise((resolve, reject) => {

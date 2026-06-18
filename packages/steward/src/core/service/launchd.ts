@@ -77,8 +77,7 @@ export class LaunchdServiceManager implements ServiceManager {
 	readonly kind = "launchd" as const;
 
 	install(name: string, opts?: ServiceInstallOptions): void {
-		// Register only: write the plist (launchd loads it at next login). We don't bootstrap it
-		// now, so deploy never spawns a second daemon competing with the current one.
+		// Write the plist; `start` bootstraps it. (Split so the caller controls when it runs.)
 		const plist = buildLaunchAgentPlist({
 			label: launchAgentLabel(name),
 			programArguments: daemonLaunchCommand(name, opts),
@@ -89,7 +88,8 @@ export class LaunchdServiceManager implements ServiceManager {
 		});
 		mkdirSync(dirname(plistPath(name)), { recursive: true });
 		mkdirSync(getDaemonRuntimeDir(), { recursive: true });
-		writeFileSync(plistPath(name), plist, "utf-8");
+		// Owner-only: the plist can carry the daemon bearer token via EnvironmentVariables.
+		writeFileSync(plistPath(name), plist, { encoding: "utf-8", mode: 0o600 });
 	}
 
 	uninstall(name: string): void {
@@ -98,8 +98,13 @@ export class LaunchdServiceManager implements ServiceManager {
 	}
 
 	start(name: string): void {
-		// Load + run now (RunAtLoad). Used by an explicit start, not by deploy.
-		spawnSync("launchctl", ["bootstrap", domainTarget(), plistPath(name)], { encoding: "utf-8" });
+		// Bootstrap the plist so launchd runs it now (and keeps it alive).
+		const result = spawnSync("launchctl", ["bootstrap", domainTarget(), plistPath(name)], { encoding: "utf-8" });
+		if (result.status !== 0) {
+			throw new Error(
+				`launchctl bootstrap failed for "${name}": ${result.stderr?.trim() || result.error?.message || "unknown error"}`,
+			);
+		}
 	}
 
 	stop(name: string): void {

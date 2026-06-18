@@ -4,7 +4,7 @@
  * Allocates the agent's stable loopback port (persisted into agent.json) so its daemon prefers a
  * fixed port across restarts, creates the home tree, then opens a daemon client and runs the
  * interactive birth session seeded with the opener. Birth is daemon-first: abandoning a forming
- * agent leaves only a temp descriptor + a detached daemon that idles out — no OS service unit
+ * agent leaves only a temp daemon config + a detached daemon that idles out — no OS service unit
  * (those land only at deploy).
  */
 
@@ -27,8 +27,13 @@ export async function runNew(positionals: string[], model?: string): Promise<num
 	}
 
 	const port = await allocateStablePort();
-	const config = createAgent({ name, model, port });
-	process.stdout.write(`Created agent "${config.name}".\n`);
+	try {
+		const config = createAgent({ name, model, port });
+		process.stdout.write(`Created agent "${config.name}".\n`);
+	} catch (error) {
+		process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+		return 1;
+	}
 
 	const session = await DaemonSession.open(name);
 	await new InteractiveMode(session, { initialAssistantMessage: BIRTH_OPENER }).run();

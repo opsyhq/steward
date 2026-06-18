@@ -62,8 +62,8 @@ export class SystemdServiceManager implements ServiceManager {
 	}
 
 	install(name: string, opts?: ServiceInstallOptions): void {
-		// Register only: write the unit + enable it for boot (no `--now`), so deploy never starts a
-		// second daemon competing with the current one. It comes up on next login.
+		// Write + enable the unit for boot (no `--now`); `start` runs it. Split so the caller controls
+		// when it runs.
 		const unit = buildSystemdUnit({
 			description: `${APP_NAME} agent "${name}" daemon`,
 			execStart: daemonLaunchCommand(name, opts),
@@ -71,7 +71,8 @@ export class SystemdServiceManager implements ServiceManager {
 			environment: serviceEnvironment(),
 		});
 		mkdirSync(dirname(unitPath(name)), { recursive: true });
-		writeFileSync(unitPath(name), unit, "utf-8");
+		// Owner-only: the unit can carry the daemon bearer token via Environment=.
+		writeFileSync(unitPath(name), unit, { encoding: "utf-8", mode: 0o600 });
 
 		this.userctl(["daemon-reload"]);
 		const result = this.userctl(["enable", systemdUnitName(name)]);
@@ -89,8 +90,13 @@ export class SystemdServiceManager implements ServiceManager {
 	}
 
 	start(name: string): void {
-		// Run now. Used by an explicit start, not by deploy.
-		this.userctl(["enable", "--now", systemdUnitName(name)]);
+		// Enable + run now (and on boot).
+		const result = this.userctl(["enable", "--now", systemdUnitName(name)]);
+		if (result.status !== 0) {
+			throw new Error(
+				`systemctl --user enable --now failed for "${name}": ${result.stderr?.trim() || result.error?.message || "unknown error"}`,
+			);
+		}
 	}
 
 	stop(name: string): void {

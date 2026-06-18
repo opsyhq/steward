@@ -9,8 +9,8 @@
  *   - reads that change rarely (`config`/`cwd`, the loaded-resource summary, the command set) are
  *      served from the cached hello/get_state snapshot; per-turn reads (entries, messages) round-trip.
  *
- * Lifecycle (`open`) is intentionally minimal here — descriptor → /health → attach, else spawn a
- * detached `daemon` and poll /health. Slice 3 (Item 6) hardens it into the full liveness ladder.
+ * Lifecycle (`open`) is intentionally minimal: read the daemon config → /health → attach, else spawn
+ * a detached `daemon` and poll /health.
  */
 
 import { spawn } from "node:child_process";
@@ -93,8 +93,8 @@ export class DaemonSession {
 	}
 
 	/**
-	 * Resolve the agent's daemon (descriptor → /health) and attach, spawning a detached daemon if
-	 * none is live.
+	 * Resolve the agent's daemon (config → /health) and attach, spawning a detached daemon if none is
+	 * live.
 	 */
 	static async open(name: string): Promise<DaemonSession> {
 		const existing = loadDaemonConfig(name);
@@ -110,8 +110,8 @@ export class DaemonSession {
 		});
 		child.unref();
 
-		const desc = await waitForHealth(name);
-		return DaemonSession.attach(`http://127.0.0.1:${desc.port}`, desc.token);
+		const config = await waitForHealth(name);
+		return DaemonSession.attach(`http://127.0.0.1:${config.port}`, config.token);
 	}
 
 	// ---- The single transport seam ----
@@ -158,7 +158,7 @@ export class DaemonSession {
 				}
 			}
 		} catch {
-			// The stream ended or was aborted — Slice 3 adds reconnect; for now the TUI exits on its own.
+			// The stream ended or was aborted; the consumer stops and the TUI exits on its own.
 		}
 	}
 

@@ -1,6 +1,6 @@
 /**
  * OS service backend — detection override, the factory, the pure plist/unit builders, the launch
- * command, and the `none` backend's descriptor-driven liveness. The launchd/systemd backends'
+ * command, and the `none` backend's config-driven liveness. The launchd/systemd backends'
  * real `launchctl`/`systemctl` wiring is exercised by the live verify, not here (a unit test must
  * not register a real OS service).
  */
@@ -112,7 +112,7 @@ describe("none backend", () => {
 		expect(() => none.uninstall(AGENT)).not.toThrow();
 	});
 
-	it("reports running from a live descriptor pid", () => {
+	it("reports running from a live config pid", () => {
 		expect(none.isRunning(AGENT)).toBe(false);
 		saveDaemonConfig(AGENT, {
 			pid: process.pid,
@@ -124,7 +124,7 @@ describe("none backend", () => {
 		expect(none.isRunning(AGENT)).toBe(true);
 	});
 
-	it("stop clears a stale descriptor whose pid is gone", () => {
+	it("stop clears a stale config whose pid is gone", () => {
 		saveDaemonConfig(AGENT, {
 			pid: 2147483647, // far above any real pid → SIGTERM throws ESRCH
 			port: 1,

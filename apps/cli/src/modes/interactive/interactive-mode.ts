@@ -642,8 +642,6 @@ export class InteractiveMode {
 	 * still forming (the birth-session invariant). A thrown swap degrades gracefully here.
 	 */
 	private async swapToNewSession(reason: "deploy" | "new"): Promise<boolean> {
-		// `reason` records the caller's intent: the daemon refuses a `"new"` swap while the agent is
-		// still forming (the birth-session invariant).
 		return this.swapSession(() => this.session.newSession({ reason }));
 	}
 

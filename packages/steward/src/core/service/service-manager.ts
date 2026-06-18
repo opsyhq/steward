@@ -12,7 +12,7 @@ import { SystemdServiceManager } from "./systemd.ts";
 export type ServiceKind = "launchd" | "systemd" | "none";
 
 export interface ServiceInstallOptions {
-	/** The stable loopback port passed to `daemon <name>` (omitted/0 → OS-assigned, descriptor-discovered). */
+	/** The stable loopback port passed to `daemon <name>` (omitted/0 → OS-assigned, config-discovered). */
 	port?: number;
 }
 

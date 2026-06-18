@@ -287,7 +287,7 @@ export async function runDaemonMode(host: SessionHost, options: { port: number; 
 	});
 
 	// ---- Serve ------------------------------------------------------------
-	// Patch the resolved port back into the descriptor — for `port: 0` the real port is only
+	// Patch the resolved port back into the config — for `port: 0` the real port is only
 	// known once the OS assigns it (read off serve()'s `info.port`).
 	const writePortBack = (port: number): void => {
 		const existing = loadDaemonConfig(host.config.name);

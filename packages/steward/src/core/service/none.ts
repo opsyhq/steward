@@ -2,7 +2,7 @@
  * none backend — the unsupported-OS fallback (no launchd/systemd). There is no supervisor, so
  * `install`/`start` are inert: the daemon that handled deploy keeps running for this session, and a
  * client re-spawns one on demand (`DaemonSession.open`) rather than the backend supervising it.
- * `stop`/`isRunning` act directly on the descriptor's pid.
+ * `stop`/`isRunning` act directly on the daemon config's pid.
  */
 
 import { deleteDaemonConfig, loadDaemonConfig } from "../daemon-config.ts";
@@ -24,21 +24,21 @@ export class NoneServiceManager implements ServiceManager {
 	}
 
 	stop(name: string): void {
-		const desc = loadDaemonConfig(name);
-		if (!desc) return;
+		const config = loadDaemonConfig(name);
+		if (!config) return;
 		try {
-			process.kill(desc.pid, "SIGTERM");
+			process.kill(config.pid, "SIGTERM");
 		} catch {
-			// Already gone — drop the stale descriptor so a future probe doesn't trust it.
+			// Already gone — drop the stale config so a future probe doesn't trust it.
 			deleteDaemonConfig(name);
 		}
 	}
 
 	isRunning(name: string): boolean {
-		const desc = loadDaemonConfig(name);
-		if (!desc) return false;
+		const config = loadDaemonConfig(name);
+		if (!config) return false;
 		try {
-			process.kill(desc.pid, 0);
+			process.kill(config.pid, 0);
 			return true;
 		} catch {
 			return false;

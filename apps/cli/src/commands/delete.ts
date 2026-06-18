@@ -1,9 +1,9 @@
 /**
  * `delete <name>` — type-the-name confirm, then tear the agent down.
  *
- * Order (plan §6.5): uninstall the OS service (so a supervised daemon won't restart) and
- * planned-stop any daemon still holding the descriptor, then delete the home dir, then drop the
- * descriptor. `deleteAgent` operates solely on the agent home — never the shared credential dir.
+ * Order: uninstall the OS service (so a supervised daemon won't restart) and stop any daemon still
+ * running, then delete the home dir, then drop the daemon config. `deleteAgent` operates solely on
+ * the agent home — never the shared credential dir.
  */
 
 import { createInterface } from "node:readline";
@@ -52,7 +52,7 @@ export async function runDelete(positionals: string[]): Promise<number> {
 	return 0;
 }
 
-/** SIGTERM a live daemon; its signal handler shuts the server down and clears the config. */
+/** SIGTERM a live daemon so its signal handler shuts the server down (runDelete drops the config). */
 function stopRunningDaemon(name: string): void {
 	const config = loadDaemonConfig(name);
 	if (!config) return;
