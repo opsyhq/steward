@@ -246,9 +246,9 @@ async function runSession(
 
 /**
  * Hidden `daemon <name>` subcommand: start the agent's `SessionHost` and wrap it in a
- * long-running HTTP/SSE server clients attach to. Mints a bearer token + writes the
- * `daemon.json` descriptor so attach clients can find the port/token, then blocks on the
- * listening server until a signal tears it down.
+ * long-running HTTP/SSE server clients attach to. Binds the agent's stable port (its durable
+ * identity in agent.json), then writes the ephemeral pid/port/token descriptor to the temp dir
+ * so attach clients can find it, and blocks on the listening server until a signal tears it down.
  */
 async function runDaemon(positionals: string[], args: Args): Promise<number> {
 	const name = positionals[0];
@@ -272,8 +272,13 @@ async function runDaemon(positionals: string[], args: Args): Promise<number> {
 	const fresh = isDeployed(config) ? Boolean(args.new) : false;
 	await host.start({ fresh });
 
+	// The port the daemon prefers to bind: the agent's durable identity in agent.json, with
+	// `--port` as a transient override for this run. 0/absent means let the OS assign one.
+	const port = args.port ?? config.port ?? 0;
+
+	// pid/port/token are ephemeral runtime state — the temp-dir descriptor, not agent.json.
+	// runDaemonMode patches `port` to the actual bound port once listening (matters when 0).
 	const token = mintDaemonToken();
-	const port = args.port ?? 0;
 	saveDaemonDescriptor(name, {
 		pid: process.pid,
 		port,

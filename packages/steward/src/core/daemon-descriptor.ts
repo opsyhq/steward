@@ -1,19 +1,21 @@
 /**
- * Daemon descriptor (`daemon.json`).
+ * Daemon runtime descriptor.
  *
- * A write-once handshake file the daemon drops into its agent home so attach clients can
- * find the running server: the `port` it bound, the bearer `token` for `/events` + `/control`,
- * and the owning `pid`. Written at start, removed at shutdown.
+ * Ephemeral handshake state the daemon writes to the OS temp dir so attach clients can find
+ * the running server: the `port` it actually bound, the bearer `token` for `/events` +
+ * `/control`, and the owning `pid`. Written at start, removed at shutdown, and gone on reboot
+ * regardless. The durable identity (the stable preferred port) lives in agent.json, not here.
  */
 
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { getAgentDaemonPath, getAgentDir } from "../config.ts";
+import { dirname } from "node:path";
+import { ENV_DAEMON_TOKEN, getAgentDaemonPath } from "../config.ts";
 
 export interface DaemonDescriptor {
 	/** PID of the daemon process (so a client can detect a stale descriptor). */
 	pid: number;
-	/** Loopback port the HTTP/SSE server bound. */
+	/** Loopback port the HTTP/SSE server actually bound this run. */
 	port: number;
 	/** Bearer token authenticating `/events` + `/control`. */
 	token: string;
@@ -23,14 +25,17 @@ export interface DaemonDescriptor {
 	version: string;
 }
 
-/** Mint a fresh bearer token for a daemon (256 bits, hex-encoded). */
+/**
+ * The daemon's bearer token: the `STEWARD_DAEMON_TOKEN` env override when set, otherwise a
+ * fresh ephemeral one (256 bits, hex-encoded) minted per start.
+ */
 export function mintDaemonToken(): string {
-	return randomBytes(32).toString("hex");
+	return process.env[ENV_DAEMON_TOKEN]?.trim() || randomBytes(32).toString("hex");
 }
 
-/** Write an agent's daemon descriptor, creating the agent home dir if needed. */
+/** Write an agent's daemon descriptor, creating the runtime dir if needed. */
 export function saveDaemonDescriptor(name: string, desc: DaemonDescriptor): void {
-	mkdirSync(getAgentDir(name), { recursive: true });
+	mkdirSync(dirname(getAgentDaemonPath(name)), { recursive: true });
 	writeFileSync(getAgentDaemonPath(name), `${JSON.stringify(desc, null, 2)}\n`, "utf-8");
 }
 
