@@ -149,6 +149,11 @@ export function getAgentIntegrationsDir(name: string): string {
 	return join(getAgentDir(name), "integrations");
 }
 
+/** Path to an agent's daemon.json (the running daemon's pid/port/token descriptor). */
+export function getAgentDaemonPath(name: string): string {
+	return join(getAgentDir(name), "daemon.json");
+}
+
 /** Path to an agent's curated SOUL.md (who it is / what it's for). */
 export function getSoulPath(name: string): string {
 	return join(getAgentDir(name), "SOUL.md");
