@@ -118,10 +118,10 @@ function parseIntegrationsCommand(args: string[]): IntegrationsCommandOptions | 
 /**
  * Client half of the onboarding round-trip: a daemon-side `onboard(ctx)` dialog arrives as an
  * `extension_ui_request` frame. Render it in the standalone startup TUI and answer over `/ui-response`
- * (value/cancelled shaping as in the interactive client). Only `select`/`confirm`/`input`/`notify`
- * occur — the narrowed `IntegrationOnboardUI`.
+ * (value/cancelled shaping as in the interactive client's own `dispatchUiRequest`). Only
+ * `select`/`confirm`/`input`/`notify` occur — the narrowed `IntegrationOnboardUI`.
  */
-async function dispatchOnboardDialog(
+async function dispatchUiRequest(
 	session: DaemonSession,
 	settingsManager: SettingsManager,
 	req: ExtensionUIRequest,
@@ -258,7 +258,7 @@ export async function runIntegrations(rest: string[], help = false): Promise<num
 					return 0;
 				}
 				const settingsManager = SettingsManager.create(getAgentDir(agent));
-				session.onUiRequest = (req) => void dispatchOnboardDialog(session, settingsManager, req);
+				session.onUiRequest = (req) => void dispatchUiRequest(session, settingsManager, req);
 				return printOnboardResults(agent, await session.onboardPackage(spec));
 			} finally {
 				session.close();
@@ -317,7 +317,7 @@ export async function runIntegrations(rest: string[], help = false): Promise<num
 			const session = await DaemonSession.open(agent);
 			try {
 				const settingsManager = SettingsManager.create(getAgentDir(agent));
-				session.onUiRequest = (req) => void dispatchOnboardDialog(session, settingsManager, req);
+				session.onUiRequest = (req) => void dispatchUiRequest(session, settingsManager, req);
 				return printOnboardResults(agent, await session.onboardIntegration(options.spec));
 			} finally {
 				session.close();
