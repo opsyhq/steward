@@ -1,16 +1,9 @@
 /**
- * `steward <agent> plugins <install|remove|list|update|configure> [source]` — a daemon client.
+ * `steward <agent> plugins <install|remove|list|update|configure> [source]`.
  *
- * A plugin is the install/distribution unit: one installed package that can contribute
- * extensions, integrations, skills, prompts, and/or themes (declared in its package.json
- * "steward" field), all resolved in place from the one install. When a plugin contains an
- * integration that declares `onboard`, `install`/`configure` run that guided setup.
- *
- * The mutating arms (install/remove/update) route to the agent's daemon, the single writer: it
- * runs the install/persist primitive against its own resources and reloads itself, so a running
- * daemon never goes stale. `list` is a read-only local view (disk is the source of truth).
- * Onboarding runs in the daemon, which emits each dialog as an `extension_ui_request` frame; the
- * client answers those frames in a standalone startup TUI and prints the per-service results.
+ * install/remove/update route to the agent's daemon (the single writer, which reloads itself);
+ * list reads disk locally. If a plugin's integration declares `onboard`, install/configure run
+ * that guided setup over the daemon's `extension_ui_request` round-trip, rendered in a startup TUI.
  */
 
 import {
@@ -42,24 +35,24 @@ interface PluginsCommandOptions {
 	invalidArgument?: string;
 }
 
-function getPluginsCommandUsage(agent: string, command: PluginsCommand): string {
+function getPluginsCommandUsage(command: PluginsCommand): string {
 	switch (command) {
 		case "install":
-			return `${APP_NAME} ${agent} plugins install <source>`;
+			return `${APP_NAME} <agent> plugins install <source>`;
 		case "remove":
-			return `${APP_NAME} ${agent} plugins remove <source>`;
+			return `${APP_NAME} <agent> plugins remove <source>`;
 		case "list":
-			return `${APP_NAME} ${agent} plugins list`;
+			return `${APP_NAME} <agent> plugins list`;
 		case "update":
-			return `${APP_NAME} ${agent} plugins update [source]`;
+			return `${APP_NAME} <agent> plugins update [source]`;
 		case "configure":
-			return `${APP_NAME} ${agent} plugins configure <source>`;
+			return `${APP_NAME} <agent> plugins configure <source>`;
 	}
 }
 
-function printPluginsCommandHelp(agent: string, command: PluginsCommand): void {
+function printPluginsCommandHelp(command: PluginsCommand): void {
 	console.log(`${chalk.bold("Usage:")}
-  ${getPluginsCommandUsage(agent, command)}
+  ${getPluginsCommandUsage(command)}
 `);
 	switch (command) {
 		case "install":
@@ -69,9 +62,9 @@ package.json "steward" field), all resolved in place from the one install. When 
 contains an integration with guided setup, onboarding runs automatically.
 
 Sources:
-  npm:    ${APP_NAME} ${agent} plugins install npm:@scope/pkg
-  git:    ${APP_NAME} ${agent} plugins install git:github.com/user/repo
-  local:  ${APP_NAME} ${agent} plugins install ./path/to/plugin
+  npm:    ${APP_NAME} <agent> plugins install npm:@scope/pkg
+  git:    ${APP_NAME} <agent> plugins install git:github.com/user/repo
+  local:  ${APP_NAME} <agent> plugins install ./path/to/plugin
 `);
 			return;
 		case "remove":
@@ -131,12 +124,7 @@ function parsePluginsCommand(rest: string[]): PluginsCommandOptions | undefined 
 	return { command, source, help, invalidOption, invalidArgument };
 }
 
-/**
- * Client half of the onboarding round-trip: a daemon-side `onboard(ctx)` dialog arrives as an
- * `extension_ui_request` frame. Render it in the standalone startup TUI and answer over `/ui-response`
- * (value/cancelled shaping as in the interactive client's own `dispatchUiRequest`). Only
- * `select`/`confirm`/`input`/`notify` occur — the narrowed `IntegrationOnboardUI`.
- */
+/** Render one daemon-side onboarding dialog in the startup TUI and answer it over `/ui-response`. */
 async function dispatchUiRequest(
 	session: DaemonSession,
 	settingsManager: SettingsManager,
@@ -166,7 +154,6 @@ async function dispatchUiRequest(
 			return;
 		}
 		case "notify":
-			// Each startup dialog is its own short-lived TUI, so notifications print between prompts.
 			if (req.notifyType === "error") {
 				console.error(chalk.red(req.message));
 			} else if (req.notifyType === "warning") {
@@ -175,15 +162,11 @@ async function dispatchUiRequest(
 				console.log(chalk.cyan(req.message));
 			}
 			return;
-		// Any other method can't arise from the narrowed onboarding UI — ignore it.
+		// Other methods can't arise from onboarding's narrowed UI.
 	}
 }
 
-/**
- * Print the daemon's structured per-service onboarding results client-side (the old status switch).
- * `emptyMessage` is printed when there are no onboarding integrations — install suppresses it (an
- * extension-only plugin installs cleanly), `configure` surfaces it.
- */
+/** Print per-service onboarding results; `emptyMessage` shows when the plugin onboarded nothing. */
 function printOnboardResults(agent: string, results: OnboardServiceResult[], emptyMessage?: string): number {
 	if (results.length === 0) {
 		if (emptyMessage) {
@@ -221,7 +204,7 @@ function printOnboardResults(agent: string, results: OnboardServiceResult[], emp
 export async function runPlugins(agent: string, rest: string[], help = false): Promise<number> {
 	const options = parsePluginsCommand(rest);
 	if (!options) {
-		const usage = `${APP_NAME} ${agent} plugins <install|remove|list|update|configure> [source]`;
+		const usage = `${APP_NAME} <agent> plugins <install|remove|list|update|configure> [source]`;
 		if (help) {
 			console.log(`Usage: ${usage}`);
 			return 0;
@@ -231,14 +214,12 @@ export async function runPlugins(agent: string, rest: string[], help = false): P
 		return 1;
 	}
 
-	// `--help`/`-h` is consumed globally by parseArgs into `help`; the parser's own
-	// `options.help` covers the (rare) case it survives in `rest`.
 	if (help || options.help) {
-		printPluginsCommandHelp(agent, options.command);
+		printPluginsCommandHelp(options.command);
 		return 0;
 	}
 
-	const usage = getPluginsCommandUsage(agent, options.command);
+	const usage = getPluginsCommandUsage(options.command);
 	if (options.invalidOption) {
 		console.error(chalk.red(`Unknown option ${options.invalidOption} for "${options.command}".`));
 		console.error(chalk.dim(`Usage: ${usage}`));
@@ -255,7 +236,7 @@ export async function runPlugins(agent: string, rest: string[], help = false): P
 		return 1;
 	}
 
-	// Require the source up front (install/remove/configure) so we never spawn a daemon just to usage-error.
+	// Require the source up front so we don't spawn a daemon just to usage-error.
 	if (
 		(options.command === "install" || options.command === "remove" || options.command === "configure") &&
 		!options.source
@@ -265,7 +246,7 @@ export async function runPlugins(agent: string, rest: string[], help = false): P
 		return 1;
 	}
 
-	// `list` is a read-only local view — disk is the source of truth, no stale risk, no daemon needed.
+	// list reads disk locally — no daemon needed.
 	if (options.command === "list") {
 		const { pluginManager } = createAgentPluginManager(agent);
 		const configured = pluginManager.listConfiguredPlugins();
@@ -282,8 +263,7 @@ export async function runPlugins(agent: string, rest: string[], help = false): P
 			}
 		}
 
-		// Second section: the integrations these plugins (and auto-discovery) contribute — the view
-		// the old `integrations list` showed, reusing the same resolve() call (local/offline-capable).
+		// Plus the integrations these plugins (and auto-discovery) contribute.
 		const resolvedPaths = await pluginManager.resolve();
 		const integrations = resolvedPaths.integrations.filter((r) => r.enabled);
 		if (integrations.length > 0) {
@@ -296,13 +276,12 @@ export async function runPlugins(agent: string, rest: string[], help = false): P
 		return 0;
 	}
 
-	// Guided setup mounts a TUI — reject `configure` early (before spawning a daemon) when headless.
+	// Guided setup mounts a TUI — reject configure early (before spawning a daemon) when headless.
 	if (options.command === "configure" && !isInteractiveTerminal()) {
 		console.error(chalk.red("Guided setup requires an interactive terminal."));
 		return 1;
 	}
 
-	// Mutating arms route to the daemon (the single writer).
 	const session = await DaemonSession.open(agent);
 	try {
 		switch (options.command) {
@@ -316,7 +295,7 @@ export async function runPlugins(agent: string, rest: string[], help = false): P
 					console.error(chalk.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
 					return 1;
 				}
-				// Flow straight into guided setup when interactive; otherwise tell the user how.
+				// Onboard now if interactive; otherwise point at configure.
 				if (!isInteractiveTerminal()) {
 					console.log(chalk.dim(`Run "${APP_NAME} ${agent} plugins configure ${source}" to set it up.`));
 					return 0;
