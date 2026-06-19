@@ -7,6 +7,16 @@
 
 export { serializeConversation } from "@opsyhq/agent";
 export { type Args, parseArgs, printHelp } from "./cli/args.ts";
+// Shared UI components + keybinding-hint helpers imported by the @opsyhq/cli daemon client (the
+// interactive TUI lives in apps/cli); DynamicBorder and the keyHint/keyText helpers are also part
+// of the extension SDK surface.
+export { DynamicBorder } from "./components/dynamic-border.ts";
+export {
+	keyDisplayText,
+	keyHint,
+	keyText,
+	rawKeyHint,
+} from "./components/keybinding-hints.ts";
 export * from "./config.ts";
 export {
 	AGENT_SCHEMA_VERSION,
@@ -291,7 +301,7 @@ export { createMemoryTool, type MemoryToolDetails, type MemoryToolInput } from "
 export { resolveReadPathAsync, resolveToCwd } from "./core/tools/path-utils.ts";
 export { createReadTool, type ReadToolDetails, type ReadToolInput } from "./core/tools/read.ts";
 export { createWriteTool, type WriteToolInput } from "./core/tools/write.ts";
-export { main, type RunDaemonOptions, runDaemon } from "./main.ts";
+export { type RunDaemonOptions, runDaemon } from "./daemon/server.ts";
 export type {
 	DaemonCommand,
 	DaemonResponse,
@@ -299,17 +309,8 @@ export type {
 	ExtensionUIRequest,
 	ExtensionUIResponse,
 	OnboardServiceResult,
-} from "./modes/daemon/daemon-types.ts";
-// Shared UI components + keybinding-hint helpers imported by the @opsyhq/cli daemon client (the
-// interactive TUI lives in apps/cli); DynamicBorder and the keyHint/keyText helpers are also part
-// of the extension SDK surface.
-export { DynamicBorder } from "./components/dynamic-border.ts";
-export {
-	keyDisplayText,
-	keyHint,
-	keyText,
-	rawKeyHint,
-} from "./components/keybinding-hints.ts";
+} from "./daemon/types.ts";
+export { main } from "./main.ts";
 export {
 	getAvailableThemesWithPaths,
 	getEditorTheme,
