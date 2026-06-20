@@ -1,14 +1,16 @@
-/** Agent detail page: a scaffold from `agent.config` with placeholder sections. Never opens a daemon. */
+/** Agent detail page: a read-only scaffold from agent.config. Never opens a daemon. */
 
 import { type Agent, isDeployed, theme } from "@opsyhq/steward";
-import { type Component, Container, matchesKey, Spacer, Text } from "@opsyhq/tui";
+import { type Component, Container, matchesKey, type OverlayHandle, Spacer, Text } from "@opsyhq/tui";
 import type { AppView, ViewContext } from "../app.ts";
+import { DeleteConfirm } from "./components/delete-confirm.ts";
 
 const PLACEHOLDER_SECTIONS = ["Tools", "Integrations", "Runtime"];
 
 export class AgentView extends Container implements AppView {
 	private ctx!: ViewContext;
 	private readonly agent: Agent;
+	private overlay?: OverlayHandle;
 
 	constructor(agent: Agent) {
 		super();
@@ -39,7 +41,7 @@ export class AgentView extends Container implements AppView {
 			this.addChild(new Spacer(1));
 		}
 
-		this.addChild(new Text(theme.fg("dim", "enter/→ chat · esc/← back"), 1, 0));
+		this.addChild(new Text(theme.fg("dim", "enter/→ chat · d delete · esc/← back"), 1, 0));
 	}
 
 	handleInput(data: string): void {
@@ -51,14 +53,32 @@ export class AgentView extends Container implements AppView {
 			void this.ctx.navigate({ to: "chat", name: this.agent.name });
 			return;
 		}
+		if (data === "d") {
+			this.openDelete();
+			return;
+		}
 		if (matchesKey(data, "escape") || matchesKey(data, "left")) {
 			this.ctx.home();
 		}
+	}
+
+	private openDelete(): void {
+		const confirm = new DeleteConfirm(this.agent, {
+			onCancel: () => this.overlay?.hide(),
+			onDeleted: () => {
+				this.overlay?.hide();
+				this.ctx.home();
+			},
+			onQuit: () => this.ctx.quit(),
+		});
+		this.overlay = this.ctx.tui.showOverlay(confirm, { anchor: "center", width: "50%", minWidth: 40, maxHeight: "60%" });
 	}
 
 	focusTarget(): Component {
 		return this;
 	}
 
-	onUnmount(): void {}
+	onUnmount(): void {
+		this.overlay?.hide();
+	}
 }
