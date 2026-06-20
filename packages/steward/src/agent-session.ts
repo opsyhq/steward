@@ -27,14 +27,13 @@ import type {
 import type { KeyId } from "./core/keybindings.ts";
 import type { ConfiguredPlugin } from "./core/plugin-manager.ts";
 import { getServiceManager } from "./core/service/service-manager.ts";
+import type { ContextInfo, IntegrationInfo } from "./core/session-host.ts";
 import type { Skill } from "./core/skills.ts";
 import type {
-	ContextInfo,
 	DaemonCommand,
 	DaemonResponse,
 	DaemonSessionState,
 	ExtensionUIRequest,
-	IntegrationInfo,
 	OnboardServiceResult,
 } from "./types.ts";
 

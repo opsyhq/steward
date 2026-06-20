@@ -96,30 +96,6 @@ export type DaemonResponse =
 	| { id?: string; type: "response"; command: string; success: false; error: string };
 
 // ============================================================================
-// Capability reads (granular read commands for the agent detail page)
-// ============================================================================
-//
-// Skills/plugins return their full domain types (`Skill` / `ConfiguredPlugin`). Tools return
-// the existing `ToolInfo` view (the full `AgentTool` carries an `execute` fn that can't cross
-// the wire) plus the active selection. Integrations and contexts have no serializable full
-// type to return, so these two `*Info` shapes are the curated view — hence the `*_info` verbs.
-
-/** One integration service, with whether an account is configured and its action/event names. */
-export interface IntegrationInfo {
-	service: string;
-	configured: boolean;
-	actions: string[];
-	events: string[];
-}
-
-/** One context document the agent reads: curated memory or a project context file. */
-export interface ContextInfo {
-	name: string;
-	kind: "memory" | "project";
-	chars: number;
-}
-
-// ============================================================================
 // Extension UI (the round-trip the daemon-side extension runner drives)
 // ============================================================================
 

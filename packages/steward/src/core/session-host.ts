@@ -42,7 +42,6 @@ import {
 } from "@opsyhq/agent";
 import type { NodeExecutionEnv } from "@opsyhq/agent/node";
 import { getAgentDir, getAgentIntegrationsPath } from "../config.ts";
-import type { ContextInfo, IntegrationInfo } from "../types.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { type AgentConfig, isDeployed, loadAgentConfig } from "./agent-config.ts";
 import { createAgentPluginManager } from "./agent-plugin-manager.ts";
@@ -218,6 +217,21 @@ function getExtensionSourceLabel(extensionPath: string): string {
 function contributedResourceMetadata(extensionPath: string): PathMetadata {
 	const baseDir = extensionPath.startsWith("<") ? undefined : dirname(extensionPath);
 	return { source: getExtensionSourceLabel(extensionPath), scope: "temporary", origin: "top-level", baseDir };
+}
+
+/** One integration service: whether an account is configured, plus its action/event names. */
+export interface IntegrationInfo {
+	service: string;
+	configured: boolean;
+	actions: string[];
+	events: string[];
+}
+
+/** One context document the agent reads: curated memory or a project context file. */
+export interface ContextInfo {
+	name: string;
+	kind: "memory" | "project";
+	chars: number;
 }
 
 export class SessionHost {
@@ -452,15 +466,8 @@ export class SessionHost {
 		};
 	}
 
-	/**
-	 * Granular capability lists for the agent detail page — assembled from the same
-	 * in-process getters the resource summary counts. Each maps onto one read command on
-	 * the daemon wire. Skills/plugins return their full domain types; tools/integrations/
-	 * contexts return curated info views (the `*_info` verbs).
-	 */
+	/** Granular capability lists for the agent detail page. */
 	getToolInfos(): ToolInfo[] {
-		// NB: duplicates the getAllTools action's mapping (session-host bindExtensionCore) for
-		// now — kept separate deliberately rather than extracting a shared helper.
 		const runner = this.extensionRunner;
 		const registered = new Map(runner.getAllRegisteredTools().map((rt) => [rt.definition.name, rt]));
 		return this.harness.getTools().map((tool) => {
@@ -484,24 +491,13 @@ export class SessionHost {
 		});
 	}
 
-	/** Names of the currently-active tools, so the detail page can mark which are enabled. */
-	getActiveToolNames(): string[] {
-		return this.harness.getActiveTools().map((tool) => tool.name);
-	}
-
 	getIntegrationInfos(): IntegrationInfo[] {
-		const capabilities = new Map(
-			(this._integrationRunner?.getServiceCapabilities() ?? []).map((cap) => [cap.service, cap]),
-		);
-		return (this._integrationRunner?.getServices() ?? []).map((service) => {
-			const cap = capabilities.get(service);
-			return {
-				service,
-				configured: this.integrationAccounts.listAccounts(service).length > 0,
-				actions: cap?.actions ?? [],
-				events: cap?.events ?? [],
-			};
-		});
+		return (this._integrationRunner?.getServiceCapabilities() ?? []).map((cap) => ({
+			service: cap.service,
+			configured: this.integrationAccounts.listAccounts(cap.service).length > 0,
+			actions: cap.actions,
+			events: cap.events,
+		}));
 	}
 
 	getSkills(): Skill[] {

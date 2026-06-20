@@ -1,9 +1,4 @@
-/**
- * Agent detail page: the config-based header (name/status/purpose/model) plus live
- * capability sections — tools, integrations, skills, plugins, contexts — read from the
- * agent's daemon. Opening the page now opens a daemon (same cost the chat route pays); it
- * degrades gracefully to just the header when the daemon is unreachable.
- */
+/** Agent detail page: config header plus live capability sections read from the daemon. */
 
 import { type Agent, type AgentSession, isDeployed, theme } from "@opsyhq/steward";
 import { type Component, Container, matchesKey, type OverlayHandle, Spacer, Text } from "@opsyhq/tui";

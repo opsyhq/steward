@@ -242,7 +242,10 @@ async function handleCommand(host: SessionHost, cmd: DaemonCommand): Promise<Dae
 		case "get_resource_summary":
 			return ok(id, "get_resource_summary", host.getResourceSummary());
 		case "get_tool_info":
-			return ok(id, "get_tool_info", { tools: host.getToolInfos(), activeToolNames: host.getActiveToolNames() });
+			return ok(id, "get_tool_info", {
+				tools: host.getToolInfos(),
+				activeToolNames: harness.getActiveTools().map((tool) => tool.name),
+			});
 		case "get_integration_info":
 			return ok(id, "get_integration_info", { integrations: host.getIntegrationInfos() });
 		case "get_skills":

@@ -229,7 +229,12 @@ export {
 	type OpenAgentSessionResult,
 	openAgentSession,
 } from "./core/session.ts";
-export { SessionHost, type SessionHostOptions } from "./core/session-host.ts";
+export {
+	type ContextInfo,
+	type IntegrationInfo,
+	SessionHost,
+	type SessionHostOptions,
+} from "./core/session-host.ts";
 export type {
 	BranchSummaryEntry,
 	CompactionEntry,
@@ -311,13 +316,11 @@ export {
 	theme,
 } from "./theme/theme.ts";
 export type {
-	ContextInfo,
 	DaemonCommand,
 	DaemonResponse,
 	DaemonSessionState,
 	ExtensionUIRequest,
 	ExtensionUIResponse,
-	IntegrationInfo,
 	OnboardServiceResult,
 } from "./types.ts";
 export { stripAnsi } from "./utils/ansi.ts";
