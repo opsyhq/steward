@@ -1,7 +1,7 @@
 /**
  * Interactive TUI chat mode — a daemon client.
  *
- * Drives a `DaemonSession` (the one `fetch`/SSE seam) instead of an in-process `SessionHost`:
+ * Drives an `AgentSession` (the one `fetch`/SSE seam) instead of an in-process `SessionHost`:
  * actions are control-command round-trips and the event stream arrives over SSE, byte-identical to
  * the in-process harness events this consumed before. Those events are bridged onto a small
  * retained-mode component tree (a chat log `Container`, a status `Container` holding a `Loader`, and
@@ -36,6 +36,7 @@ import {
 	TUI,
 } from "@opsyhq/tui";
 import {
+	type AgentSession,
 	type AutocompleteProviderFactory,
 	BUILTIN_SLASH_COMMANDS,
 	createBashExecutionMessage,
@@ -70,7 +71,6 @@ import {
 	type TruncationResult,
 	type WorkingIndicatorOptions,
 } from "@opsyhq/steward";
-import { DaemonSession } from "../../daemon-session.ts";
 import { FooterDataProvider } from "../../footer-data-provider.ts";
 import { KeybindingsManager } from "../../keybindings-manager.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
@@ -134,7 +134,7 @@ function isExpandable(obj: unknown): obj is Expandable {
 }
 
 export class InteractiveMode {
-	private readonly session: DaemonSession;
+	private readonly session: AgentSession;
 	private readonly options: InteractiveModeOptions;
 	private readonly ui: TUI;
 	private readonly chatContainer: Container;
@@ -220,7 +220,7 @@ export class InteractiveMode {
 	private autocompleteProviderWrappers: AutocompleteProviderFactory[] = [];
 	private fdPath: string | undefined;
 
-	constructor(session: DaemonSession, options: InteractiveModeOptions = {}) {
+	constructor(session: AgentSession, options: InteractiveModeOptions = {}) {
 		this.session = session;
 		this.options = options;
 		// The theme proxy and keybinding hints used by the tool renderers throw

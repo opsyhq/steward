@@ -20,30 +20,29 @@ import type { AgentHarness, AgentHarnessEvent, ThinkingLevel } from "@opsyhq/age
 import { Hono } from "hono";
 import { bearerAuth } from "hono/bearer-auth";
 import { type SSEStreamingApi, streamSSE } from "hono/streaming";
-import { APP_NAME, ENV_DAEMON_TOKEN, getAgentDir, VERSION } from "../config.ts";
-import { type AgentConfig, agentExists, deployAgent, isDeployed, loadAgentConfig } from "../core/agent-config.ts";
-import { createAgentPluginManager } from "../core/agent-plugin-manager.ts";
-import { AuthStorage } from "../core/auth-storage.ts";
-import { loadDaemonConfig, saveDaemonConfig } from "../core/daemon-config.ts";
-import { DEFAULT_MODEL, DEFAULT_THINKING_LEVEL } from "../core/defaults.ts";
+import { APP_NAME, ENV_DAEMON_TOKEN, getAgentDir, VERSION } from "./config.ts";
+import { type AgentConfig, agentExists, deployAgent, isDeployed, loadAgentConfig } from "./core/agent-config.ts";
+import { createAgentPluginManager } from "./core/agent-plugin-manager.ts";
+import { AuthStorage } from "./core/auth-storage.ts";
+import { loadDaemonConfig, saveDaemonConfig } from "./core/daemon-config.ts";
+import { DEFAULT_MODEL, DEFAULT_THINKING_LEVEL } from "./core/defaults.ts";
 import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
 	WorkingIndicatorOptions,
-} from "../core/extensions/index.ts";
-import { IntegrationAccountStorage } from "../core/integration-account-storage.ts";
-import { loadIntegrations } from "../core/integrations/loader.ts";
-import { onboardIntegration } from "../core/integrations/onboarding.ts";
-import type { Integration, IntegrationOnboardUI } from "../core/integrations/types.ts";
-import { ModelRegistry } from "../core/model-registry.ts";
-import { resolveCliModel } from "../core/model-resolver.ts";
-import type { DefaultPluginManager } from "../core/plugin-manager.ts";
-import { getServiceManager } from "../core/service/service-manager.ts";
-import { SessionHost } from "../core/session-host.ts";
-import { getDefaultModel, getDefaultProvider } from "../core/settings.ts";
-import { type Theme, theme } from "../theme/theme.ts";
-import { getCwdRelativePath, resolvePath } from "../utils/paths.ts";
+} from "./core/extensions/index.ts";
+import { IntegrationAccountStorage } from "./core/integration-account-storage.ts";
+import { loadIntegrations } from "./core/integrations/loader.ts";
+import { onboardIntegration } from "./core/integrations/onboarding.ts";
+import type { Integration, IntegrationOnboardUI } from "./core/integrations/types.ts";
+import { ModelRegistry } from "./core/model-registry.ts";
+import { resolveCliModel } from "./core/model-resolver.ts";
+import type { DefaultPluginManager } from "./core/plugin-manager.ts";
+import { getServiceManager } from "./core/service/service-manager.ts";
+import { SessionHost } from "./core/session-host.ts";
+import { getDefaultModel, getDefaultProvider } from "./core/settings.ts";
+import { type Theme, theme } from "./theme/theme.ts";
 import {
 	type DaemonCommand,
 	type DaemonCommandType,
@@ -55,6 +54,7 @@ import {
 	FORWARDED_EVENT_TYPES,
 	type OnboardServiceResult,
 } from "./types.ts";
+import { getCwdRelativePath, resolvePath } from "./utils/paths.ts";
 
 /** How many recent events the broadcaster keeps for `Last-Event-ID` replay. */
 const RING_SIZE = 256;

@@ -1,7 +1,7 @@
 /**
  * none backend — the unsupported-OS fallback (no launchd/systemd). There is no supervisor, so
  * `install`/`start` are inert: the daemon that handled deploy keeps running for this session, and a
- * client re-spawns one on demand (`DaemonSession.open`) rather than the backend supervising it.
+ * client re-spawns one on demand (`Agent.open`) rather than the backend supervising it.
  * `stop`/`isRunning` act directly on the daemon config's pid.
  */
 
@@ -20,7 +20,7 @@ export class NoneServiceManager implements ServiceManager {
 	}
 
 	start(_name: string): void {
-		// No supervisor to start; the daemon lifecycle is the client's (DaemonSession.open) concern.
+		// No supervisor to start; the daemon lifecycle is the client's (Agent.open) concern.
 	}
 
 	stop(name: string): void {

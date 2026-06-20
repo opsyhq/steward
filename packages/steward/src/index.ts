@@ -6,6 +6,10 @@
  */
 
 export { serializeConversation } from "@opsyhq/agent";
+// The client surface: the agent collection (`Steward`), one agent (`Agent`), and the live per-agent
+// daemon connection (`AgentSession`) the interactive TUI + `--print` drive.
+export { AgentSession } from "./agent-session.ts";
+export { Agent, Steward } from "./client.ts";
 // Shared UI components + keybinding-hint helpers imported by the @opsyhq/cli daemon client (the
 // interactive TUI lives in apps/cli); DynamicBorder and the keyHint/keyText helpers are also part
 // of the extension SDK surface.
@@ -21,14 +25,10 @@ export {
 	AGENT_SCHEMA_VERSION,
 	type AgentConfig,
 	AgentConfigSchema,
-	agentExists,
 	type CreateAgentOptions,
-	createAgent,
-	deleteAgent,
 	deployAgent,
 	isDeployed,
 	isValidAgentName,
-	listAgents,
 	loadAgentConfig,
 	saveAgentConfig,
 	setAgentPurpose,
@@ -47,7 +47,6 @@ export {
 // Engine surface consumed by the @opsyhq/cli daemon client (Phase 2, Slice 1): the interactive
 // TUI + the built-in tool renderers were lifted into apps/cli and reach back for these helpers.
 export { executeBashWithOperations } from "./core/bash-executor.ts";
-export { type DaemonConfig, deleteDaemonConfig, loadDaemonConfig } from "./core/daemon-config.ts";
 export { DEFAULT_MODEL, DEFAULT_THINKING_LEVEL } from "./core/defaults.ts";
 export type { ResourceDiagnostic, ResourceSummary } from "./core/diagnostics.ts";
 // Extension system
@@ -224,12 +223,7 @@ export {
 	createAgentSession,
 } from "./core/sdk.ts";
 // OS service backend (deploy/delete + the daemon entry use it to keep a deployed agent always-on).
-export {
-	detectServiceManager,
-	getServiceManager,
-	type ServiceKind,
-	type ServiceManager,
-} from "./core/service/service-manager.ts";
+export { detectServiceManager, type ServiceKind, type ServiceManager } from "./core/service/service-manager.ts";
 export {
 	type OpenAgentSessionOptions,
 	type OpenAgentSessionResult,
@@ -300,15 +294,7 @@ export { createMemoryTool, type MemoryToolDetails, type MemoryToolInput } from "
 export { resolveReadPathAsync, resolveToCwd } from "./core/tools/path-utils.ts";
 export { createReadTool, type ReadToolDetails, type ReadToolInput } from "./core/tools/read.ts";
 export { createWriteTool, type WriteToolInput } from "./core/tools/write.ts";
-export { type RunDaemonOptions, runDaemon } from "./daemon/server.ts";
-export type {
-	DaemonCommand,
-	DaemonResponse,
-	DaemonSessionState,
-	ExtensionUIRequest,
-	ExtensionUIResponse,
-	OnboardServiceResult,
-} from "./daemon/types.ts";
+export { type RunDaemonOptions, runDaemon } from "./server.ts";
 export {
 	getAvailableThemesWithPaths,
 	getEditorTheme,
@@ -324,6 +310,14 @@ export {
 	Theme,
 	theme,
 } from "./theme/theme.ts";
+export type {
+	DaemonCommand,
+	DaemonResponse,
+	DaemonSessionState,
+	ExtensionUIRequest,
+	ExtensionUIResponse,
+	OnboardServiceResult,
+} from "./types.ts";
 export { stripAnsi } from "./utils/ansi.ts";
 export { applyExifOrientation } from "./utils/exif-orientation.ts";
 export { parseFrontmatter, stripFrontmatter } from "./utils/frontmatter.ts";

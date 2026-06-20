@@ -1,41 +1,39 @@
 /**
- * DaemonSession — the single `fetch`/SSE seam between the interactive TUI (and `--print`) and a
- * per-agent daemon. It is concrete, `apps/cli`-local, and exposes exactly the methods the TUI calls;
- * it is NOT a reusable contract and changes when the TUI changes.
+ * AgentSession — the single `fetch`/SSE seam between a client (the interactive TUI and `--print`)
+ * and a per-agent daemon. It is concrete and exposes exactly the methods the TUI calls; it is NOT a
+ * reusable contract and changes when the TUI changes. Construction is `Agent.open()`/`Agent.attach()`
+ * (find-or-start lives on `Agent`); this is the live connection it hands back.
  *
  *   - `send()`  — every `POST /control` command goes through here (the one place `fetch` lives).
  *   - `connect()` — opens `GET /events` (SSE) and keeps a cached snapshot fresh; forwards harness
  *      events to subscribers and routes `extension_ui_request` to `onUiRequest`.
  *   - reads that change rarely (`config`/`cwd`, the loaded-resource summary, the command set) are
  *      served from the cached hello/get_state snapshot; per-turn reads (entries, messages) round-trip.
- *
- * Lifecycle (`open`) is intentionally minimal: read the daemon config → /health → attach, else spawn
- * a detached `daemon` and poll /health.
  */
 
-import { spawn } from "node:child_process";
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import type { AgentHarnessEvent, AgentMessage, SessionContext, SessionTreeEntry } from "@opsyhq/agent";
-import {
-	type DaemonCommand,
-	type DaemonConfig,
-	type DaemonResponse,
-	type DaemonSessionState,
-	type ExtensionCommandContext,
-	type ExtensionShortcut,
-	type ExtensionUIRequest,
-	getServiceManager,
-	type KeyId,
-	loadDaemonConfig,
-	type MessageRenderer,
-	type OnboardServiceResult,
-	type ResourceSummary,
-	type SlashCommandInfo,
-	type UserBashEvent,
-	type UserBashEventResult,
-} from "@opsyhq/steward";
+import { type DaemonConfig, loadDaemonConfig } from "./core/daemon-config.ts";
+import type { ResourceSummary } from "./core/diagnostics.ts";
+import type {
+	ExtensionCommandContext,
+	ExtensionShortcut,
+	MessageRenderer,
+	SlashCommandInfo,
+	UserBashEvent,
+	UserBashEventResult,
+} from "./core/extensions/index.ts";
+import type { KeyId } from "./core/keybindings.ts";
+import { getServiceManager } from "./core/service/service-manager.ts";
+import type {
+	DaemonCommand,
+	DaemonResponse,
+	DaemonSessionState,
+	ExtensionUIRequest,
+	OnboardServiceResult,
+} from "./types.ts";
 
-/** How long `open()` waits for a freshly spawned daemon to answer `/health`. */
+/** How long `Agent.open()` waits for a freshly spawned daemon to answer `/health`. */
 const HEALTH_TIMEOUT_MS = 15_000;
 const HEALTH_POLL_MS = 150;
 
@@ -57,7 +55,7 @@ function deferred<T>(): Deferred<T> {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-export class DaemonSession {
+export class AgentSession {
 	private snap!: DaemonSessionState;
 	private queue: { steer: AgentMessage[]; followUp: AgentMessage[] } = { steer: [], followUp: [] };
 	private resourceSummary: ResourceSummary = { extensions: 0, skills: 0, prompts: 0, commands: 0, diagnostics: [] };
@@ -79,33 +77,11 @@ export class DaemonSession {
 	}
 
 	/** Attach to a known, already-running daemon: open SSE, take the hello snapshot, warm caches. */
-	static async attach(base: string, token: string): Promise<DaemonSession> {
-		const session = new DaemonSession(base, token);
+	static async attach(base: string, token: string): Promise<AgentSession> {
+		const session = new AgentSession(base, token);
 		await session.connect();
 		await session.refreshResources();
 		return session;
-	}
-
-	/**
-	 * Resolve the agent's daemon (config → /health) and attach, spawning a detached daemon if none is
-	 * live.
-	 */
-	static async open(name: string): Promise<DaemonSession> {
-		const existing = loadDaemonConfig(name);
-		if (existing && (await isHealthy(existing.port))) {
-			return DaemonSession.attach(`http://127.0.0.1:${existing.port}`, existing.token);
-		}
-
-		// Not live → spawn `steward daemon <name>` detached. `steward` is not on PATH in dev, so go
-		// through the running binary (process.execPath + the resolved cli.js off argv[1]).
-		const child = spawn(process.execPath, [process.argv[1], "daemon", name], {
-			detached: true,
-			stdio: "ignore",
-		});
-		child.unref();
-
-		const config = await waitForHealth(name);
-		return DaemonSession.attach(`http://127.0.0.1:${config.port}`, config.token);
 	}
 
 	// ---- The single transport seam ----
@@ -228,7 +204,10 @@ export class DaemonSession {
 		return () => this.handlers.delete(cb);
 	}
 
-	prompt(message: string, opts?: { images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }): Promise<void> {
+	prompt(
+		message: string,
+		opts?: { images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" },
+	): Promise<void> {
 		return this.send({ type: "prompt", message, images: opts?.images, streamingBehavior: opts?.streamingBehavior });
 	}
 
@@ -397,7 +376,7 @@ export class DaemonSession {
 }
 
 /** `GET /health` (no auth) answers `{status:"ok"}` while the daemon is listening. */
-async function isHealthy(port: number): Promise<boolean> {
+export async function isHealthy(port: number): Promise<boolean> {
 	try {
 		const response = await fetch(`http://127.0.0.1:${port}/health`, {
 			signal: AbortSignal.timeout(1000),
@@ -415,7 +394,7 @@ async function isHealthy(port: number): Promise<boolean> {
  * narrows which config counts — the deploy handoff waits for the supervised daemon (a pid different
  * from the outgoing birth daemon's), ignoring the birth daemon's soon-to-be-overwritten config.
  */
-async function waitForHealth(
+export async function waitForHealth(
 	name: string,
 	predicate: (config: DaemonConfig) => boolean = () => true,
 ): Promise<{ pid: number; port: number; token: string }> {

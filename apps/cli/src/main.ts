@@ -2,7 +2,7 @@
  * `@opsyhq/cli` dispatch.
  *
  * Agent surfaces are daemon clients: interactive `<name>`, the one-shot `--print`/inline-message
- * path, and `new` (birth chat) attach a `DaemonSession` to the agent's daemon (spawning one if
+ * path, and `new` (birth chat) attach an `AgentSession` to the agent's daemon (spawning one if
  * needed) — the CLI never builds a `SessionHost`. `new`/`list`/`delete` are local commands; the
  * agent-scoped `<name> plugins ...` subcommand routes its mutating arms to the daemon (the single
  * writer); the hidden `daemon` subcommand runs the engine's `runDaemon` in-process (the
@@ -12,17 +12,17 @@
  * is no longer deliverable (messages not starting with `plugins` are unaffected).
  */
 
-import { agentExists, APP_NAME, runDaemon, VERSION } from "@opsyhq/steward";
+import { APP_NAME, runDaemon, Steward, VERSION } from "@opsyhq/steward";
 import { parseArgs, printHelp } from "./args.ts";
 import { runDelete } from "./commands/delete.ts";
 import { runList } from "./commands/list.ts";
 import { runNew } from "./commands/new.ts";
 import { runPlugins } from "./commands/plugins.ts";
-import { DaemonSession } from "./daemon-session.ts";
 import { InteractiveMode } from "./modes/interactive/interactive-mode.ts";
 import { runPrintMode } from "./modes/print-mode.ts";
 
 export async function main(argv: string[]): Promise<number> {
+	const steward = new Steward();
 	const args = parseArgs(argv);
 	const command = args.positionals[0];
 	const sub = args.positionals[1];
@@ -53,7 +53,7 @@ export async function main(argv: string[]): Promise<number> {
 	if (command === "delete") return runDelete(args.positionals.slice(1));
 
 	// Hidden `daemon <name>`: the long-running HTTP/SSE server. Both the OS service unit and
-	// `DaemonSession.open`'s detached spawn invoke this same subcommand.
+	// `Agent.open`'s detached spawn invoke this same subcommand.
 	if (command === "daemon") {
 		const name = args.positionals[1];
 		if (!name) {
@@ -69,7 +69,8 @@ export async function main(argv: string[]): Promise<number> {
 		});
 	}
 
-	if (!agentExists(command)) {
+	const agent = steward.get(command);
+	if (!agent) {
 		process.stderr.write(`Unknown agent "${command}". Create it with: ${APP_NAME} new ${command}\n`);
 		return 1;
 	}
@@ -78,8 +79,8 @@ export async function main(argv: string[]): Promise<number> {
 			process.stderr.write(`Print mode needs a message: ${APP_NAME} ${command} --print "<message>"\n`);
 			return 1;
 		}
-		return runPrintMode(await DaemonSession.open(command), message);
+		return runPrintMode(await agent.open(), message);
 	}
-	await new InteractiveMode(await DaemonSession.open(command)).run();
+	await new InteractiveMode(await agent.open()).run();
 	return 0;
 }
