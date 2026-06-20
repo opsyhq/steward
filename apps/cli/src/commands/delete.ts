@@ -1,29 +1,20 @@
 /**
- * `delete <name>` — type-the-name confirm, then tear the agent down.
- *
- * Order: uninstall the OS service (so a supervised daemon won't restart) and stop any daemon still
- * running, then delete the home dir, then drop the daemon config. `deleteAgent` operates solely on
- * the agent home — never the shared credential dir.
+ * `delete <name>` — type-the-name confirm, then tear the agent down via `Agent.delete()` (uninstall
+ * the OS service, stop any running daemon, remove the home dir, drop the daemon config).
  */
 
 import { createInterface } from "node:readline";
-import {
-	agentExists,
-	APP_NAME,
-	deleteAgent,
-	deleteDaemonConfig,
-	getAgentDir,
-	getServiceManager,
-	loadDaemonConfig,
-} from "@opsyhq/steward";
+import { APP_NAME, getAgentDir, Steward } from "@opsyhq/steward";
 
 export async function runDelete(positionals: string[]): Promise<number> {
+	const steward = new Steward();
 	const name = positionals[0];
 	if (!name || positionals.length > 1) {
 		process.stderr.write(`Usage: ${APP_NAME} delete <name>\n`);
 		return 1;
 	}
-	if (!agentExists(name)) {
+	const agent = steward.get(name);
+	if (!agent) {
 		process.stderr.write(`Unknown agent "${name}".\n`);
 		return 1;
 	}
@@ -37,30 +28,13 @@ export async function runDelete(positionals: string[]): Promise<number> {
 		return 1;
 	}
 
-	// Uninstall first (removes the OS unit so a supervised daemon won't relaunch), then stop any
-	// daemon still running (a forming/birth daemon has no unit but is still a live process).
-	getServiceManager().uninstall(name);
-	stopRunningDaemon(name);
-
-	const result = deleteAgent(name);
+	const result = agent.delete();
 	if (!result.ok) {
 		process.stderr.write(`Failed to delete agent "${name}": ${result.error ?? "unknown error"}\n`);
 		return 1;
 	}
-	deleteDaemonConfig(name);
 	console.log(`Deleted agent "${name}".`);
 	return 0;
-}
-
-/** SIGTERM a live daemon so its signal handler shuts the server down (runDelete drops the config). */
-function stopRunningDaemon(name: string): void {
-	const config = loadDaemonConfig(name);
-	if (!config) return;
-	try {
-		process.kill(config.pid, "SIGTERM");
-	} catch {
-		// Already gone.
-	}
 }
 
 function readLine(prompt: string): Promise<string> {

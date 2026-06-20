@@ -21,14 +21,10 @@ export {
 	AGENT_SCHEMA_VERSION,
 	type AgentConfig,
 	AgentConfigSchema,
-	agentExists,
 	type CreateAgentOptions,
-	createAgent,
-	deleteAgent,
 	deployAgent,
 	isDeployed,
 	isValidAgentName,
-	listAgents,
 	loadAgentConfig,
 	saveAgentConfig,
 	setAgentPurpose,
@@ -47,7 +43,6 @@ export {
 // Engine surface consumed by the @opsyhq/cli daemon client (Phase 2, Slice 1): the interactive
 // TUI + the built-in tool renderers were lifted into apps/cli and reach back for these helpers.
 export { executeBashWithOperations } from "./core/bash-executor.ts";
-export { type DaemonConfig, deleteDaemonConfig, loadDaemonConfig } from "./core/daemon-config.ts";
 export { DEFAULT_MODEL, DEFAULT_THINKING_LEVEL } from "./core/defaults.ts";
 export type { ResourceDiagnostic, ResourceSummary } from "./core/diagnostics.ts";
 // Extension system
@@ -224,12 +219,7 @@ export {
 	createAgentSession,
 } from "./core/sdk.ts";
 // OS service backend (deploy/delete + the daemon entry use it to keep a deployed agent always-on).
-export {
-	detectServiceManager,
-	getServiceManager,
-	type ServiceKind,
-	type ServiceManager,
-} from "./core/service/service-manager.ts";
+export { detectServiceManager, type ServiceKind, type ServiceManager } from "./core/service/service-manager.ts";
 export {
 	type OpenAgentSessionOptions,
 	type OpenAgentSessionResult,
@@ -300,6 +290,10 @@ export { createMemoryTool, type MemoryToolDetails, type MemoryToolInput } from "
 export { resolveReadPathAsync, resolveToCwd } from "./core/tools/path-utils.ts";
 export { createReadTool, type ReadToolDetails, type ReadToolInput } from "./core/tools/read.ts";
 export { createWriteTool, type WriteToolInput } from "./core/tools/write.ts";
+// The client surface: the agent collection (`Steward`), one agent (`Agent`), and the live per-agent
+// daemon connection (`AgentSession`) the interactive TUI + `--print` drive.
+export { AgentSession } from "./daemon/agent-session.ts";
+export { Agent, Steward } from "./daemon/client.ts";
 export { type RunDaemonOptions, runDaemon } from "./daemon/server.ts";
 export type {
 	DaemonCommand,

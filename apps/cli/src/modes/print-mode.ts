@@ -8,9 +8,9 @@
  */
 
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { DaemonSession } from "../daemon-session.ts";
+import type { AgentSession } from "@opsyhq/steward";
 
-export async function runPrintMode(session: DaemonSession, message: string): Promise<number> {
+export async function runPrintMode(session: AgentSession, message: string): Promise<number> {
 	let exitCode = 0;
 	try {
 		await session.prompt(message);

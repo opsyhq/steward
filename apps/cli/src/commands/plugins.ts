@@ -7,16 +7,16 @@
  */
 
 import {
-	agentExists,
+	type AgentSession,
 	APP_NAME,
 	createAgentPluginManager,
 	type ExtensionUIRequest,
 	getAgentDir,
 	type OnboardServiceResult,
 	SettingsManager,
+	Steward,
 } from "@opsyhq/steward";
 import chalk from "chalk";
-import { DaemonSession } from "../daemon-session.ts";
 import { showStartupInput, showStartupSelector } from "../startup-ui.ts";
 
 /** Guided setup mounts a TUI, so it only runs on an interactive terminal. */
@@ -126,7 +126,7 @@ function parsePluginsCommand(rest: string[]): PluginsCommandOptions | undefined 
 
 /** Render one daemon-side onboarding dialog in the startup TUI and answer it over `/ui-response`. */
 async function dispatchUiRequest(
-	session: DaemonSession,
+	session: AgentSession,
 	settingsManager: SettingsManager,
 	req: ExtensionUIRequest,
 ): Promise<void> {
@@ -231,7 +231,8 @@ export async function runPlugins(agent: string, rest: string[], help = false): P
 		return 1;
 	}
 
-	if (!agentExists(agent)) {
+	const handle = new Steward().get(agent);
+	if (!handle) {
 		console.error(chalk.red(`Unknown agent "${agent}". Create it with: ${APP_NAME} new ${agent}`));
 		return 1;
 	}
@@ -282,7 +283,7 @@ export async function runPlugins(agent: string, rest: string[], help = false): P
 		return 1;
 	}
 
-	const session = await DaemonSession.open(agent);
+	const session = await handle.open();
 	try {
 		switch (options.command) {
 			case "install": {

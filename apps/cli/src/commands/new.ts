@@ -8,33 +8,34 @@
  * there, so no port is reserved up front.
  */
 
-import { agentExists, APP_NAME, createAgent } from "@opsyhq/steward";
-import { DaemonSession } from "../daemon-session.ts";
+import { type Agent, APP_NAME, Steward } from "@opsyhq/steward";
 import { InteractiveMode } from "../modes/interactive/interactive-mode.ts";
 
 // A newly born agent opens the chat itself, asking its human what it is for.
 const BIRTH_OPENER = "What is my purpose?";
 
 export async function runNew(positionals: string[], model?: string): Promise<number> {
+	const steward = new Steward();
 	const name = positionals[0];
 	if (!name || positionals.length > 1) {
 		process.stderr.write(`Usage: ${APP_NAME} new <name>\n`);
 		return 1;
 	}
-	if (agentExists(name)) {
+	if (steward.get(name)) {
 		process.stderr.write(`Agent "${name}" already exists.\n`);
 		return 1;
 	}
 
+	let agent: Agent;
 	try {
-		const config = createAgent({ name, model });
-		process.stdout.write(`Created agent "${config.name}".\n`);
+		agent = steward.create(name, { model });
+		process.stdout.write(`Created agent "${agent.config.name}".\n`);
 	} catch (error) {
 		process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
 		return 1;
 	}
 
-	const session = await DaemonSession.open(name);
+	const session = await agent.open();
 	await new InteractiveMode(session, { initialAssistantMessage: BIRTH_OPENER }).run();
 	return 0;
 }
