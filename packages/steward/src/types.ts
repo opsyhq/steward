@@ -52,6 +52,13 @@ export type DaemonCommand =
 	// Read-only views the TUI client needs that map 1:1 onto existing host methods.
 	| { id?: string; type: "get_entries" }
 	| { id?: string; type: "get_resource_summary" }
+	// Granular capability reads the agent detail page consumes, assembled from in-process
+	// getters. Full-object reads keep the plain noun; trimmed info views take an `_info` verb.
+	| { id?: string; type: "get_tool_info" }
+	| { id?: string; type: "get_integration_info" }
+	| { id?: string; type: "get_skills" }
+	| { id?: string; type: "get_plugins" }
+	| { id?: string; type: "get_context_info" }
 	// Session-mutation helpers the TUI client drives (birth opener seed; resumed-message append).
 	| { id?: string; type: "seed_assistant_message"; text: string }
 	| { id?: string; type: "append_message"; message: AgentMessage }

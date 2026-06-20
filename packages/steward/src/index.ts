@@ -229,7 +229,12 @@ export {
 	type OpenAgentSessionResult,
 	openAgentSession,
 } from "./core/session.ts";
-export { SessionHost, type SessionHostOptions } from "./core/session-host.ts";
+export {
+	type ContextInfo,
+	type IntegrationInfo,
+	SessionHost,
+	type SessionHostOptions,
+} from "./core/session-host.ts";
 export type {
 	BranchSummaryEntry,
 	CompactionEntry,
