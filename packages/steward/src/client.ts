@@ -13,6 +13,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { AgentSession, isHealthy, waitForHealth } from "./agent-session.ts";
 import {
 	type AgentConfig,
 	agentExists,
@@ -20,10 +21,9 @@ import {
 	deleteAgent,
 	listAgents,
 	loadAgentConfig,
-} from "../core/agent-config.ts";
-import { deleteDaemonConfig, loadDaemonConfig } from "../core/daemon-config.ts";
-import { daemonLaunchCommand, getServiceManager } from "../core/service/service-manager.ts";
-import { AgentSession, isHealthy, waitForHealth } from "./agent-session.ts";
+} from "./core/agent-config.ts";
+import { deleteDaemonConfig, loadDaemonConfig } from "./core/daemon-config.ts";
+import { daemonLaunchCommand, getServiceManager } from "./core/service/service-manager.ts";
 
 /** Top level: the agent collection on disk. Holds no required state. */
 export class Steward {

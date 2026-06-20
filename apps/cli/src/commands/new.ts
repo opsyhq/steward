@@ -8,7 +8,7 @@
  * there, so no port is reserved up front.
  */
 
-import { type Agent, APP_NAME, Steward } from "@opsyhq/steward";
+import { APP_NAME, Steward } from "@opsyhq/steward";
 import { InteractiveMode } from "../modes/interactive/interactive-mode.ts";
 
 // A newly born agent opens the chat itself, asking its human what it is for.
@@ -26,14 +26,10 @@ export async function runNew(positionals: string[], model?: string): Promise<num
 		return 1;
 	}
 
-	let agent: Agent;
-	try {
-		agent = steward.create(name, { model });
-		process.stdout.write(`Created agent "${agent.config.name}".\n`);
-	} catch (error) {
-		process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-		return 1;
-	}
+	// `create` throws on an invalid name; cli.ts's top-level handler prints the message and exits 1
+	// (identical to a local catch), and `agent.open()` already bubbles there — so no local try/catch.
+	const agent = steward.create(name, { model });
+	process.stdout.write(`Created agent "${agent.config.name}".\n`);
 
 	const session = await agent.open();
 	await new InteractiveMode(session, { initialAssistantMessage: BIRTH_OPENER }).run();

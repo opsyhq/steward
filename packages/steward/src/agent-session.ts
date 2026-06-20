@@ -13,8 +13,8 @@
 
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import type { AgentHarnessEvent, AgentMessage, SessionContext, SessionTreeEntry } from "@opsyhq/agent";
-import { type DaemonConfig, loadDaemonConfig } from "../core/daemon-config.ts";
-import type { ResourceSummary } from "../core/diagnostics.ts";
+import { type DaemonConfig, loadDaemonConfig } from "./core/daemon-config.ts";
+import type { ResourceSummary } from "./core/diagnostics.ts";
 import type {
 	ExtensionCommandContext,
 	ExtensionShortcut,
@@ -22,9 +22,9 @@ import type {
 	SlashCommandInfo,
 	UserBashEvent,
 	UserBashEventResult,
-} from "../core/extensions/index.ts";
-import type { KeyId } from "../core/keybindings.ts";
-import { getServiceManager } from "../core/service/service-manager.ts";
+} from "./core/extensions/index.ts";
+import type { KeyId } from "./core/keybindings.ts";
+import { getServiceManager } from "./core/service/service-manager.ts";
 import type {
 	DaemonCommand,
 	DaemonResponse,

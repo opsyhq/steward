@@ -6,6 +6,10 @@
  */
 
 export { serializeConversation } from "@opsyhq/agent";
+// The client surface: the agent collection (`Steward`), one agent (`Agent`), and the live per-agent
+// daemon connection (`AgentSession`) the interactive TUI + `--print` drive.
+export { AgentSession } from "./agent-session.ts";
+export { Agent, Steward } from "./client.ts";
 // Shared UI components + keybinding-hint helpers imported by the @opsyhq/cli daemon client (the
 // interactive TUI lives in apps/cli); DynamicBorder and the keyHint/keyText helpers are also part
 // of the extension SDK surface.
@@ -290,19 +294,7 @@ export { createMemoryTool, type MemoryToolDetails, type MemoryToolInput } from "
 export { resolveReadPathAsync, resolveToCwd } from "./core/tools/path-utils.ts";
 export { createReadTool, type ReadToolDetails, type ReadToolInput } from "./core/tools/read.ts";
 export { createWriteTool, type WriteToolInput } from "./core/tools/write.ts";
-// The client surface: the agent collection (`Steward`), one agent (`Agent`), and the live per-agent
-// daemon connection (`AgentSession`) the interactive TUI + `--print` drive.
-export { AgentSession } from "./daemon/agent-session.ts";
-export { Agent, Steward } from "./daemon/client.ts";
-export { type RunDaemonOptions, runDaemon } from "./daemon/server.ts";
-export type {
-	DaemonCommand,
-	DaemonResponse,
-	DaemonSessionState,
-	ExtensionUIRequest,
-	ExtensionUIResponse,
-	OnboardServiceResult,
-} from "./daemon/types.ts";
+export { type RunDaemonOptions, runDaemon } from "./server.ts";
 export {
 	getAvailableThemesWithPaths,
 	getEditorTheme,
@@ -318,6 +310,14 @@ export {
 	Theme,
 	theme,
 } from "./theme/theme.ts";
+export type {
+	DaemonCommand,
+	DaemonResponse,
+	DaemonSessionState,
+	ExtensionUIRequest,
+	ExtensionUIResponse,
+	OnboardServiceResult,
+} from "./types.ts";
 export { stripAnsi } from "./utils/ansi.ts";
 export { applyExifOrientation } from "./utils/exif-orientation.ts";
 export { parseFrontmatter, stripFrontmatter } from "./utils/frontmatter.ts";
