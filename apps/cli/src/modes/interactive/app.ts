@@ -11,6 +11,9 @@ import { AgentView } from "./views/agent-view.ts";
 import { ChatView } from "./views/chat-view.ts";
 import { DashboardView } from "./views/dashboard-view.ts";
 
+/** A newly born agent opens the chat itself, asking its human what it is for. Seeded as the chat opener. */
+export const BIRTH_OPENER = "What is my purpose?";
+
 /** A navigation target. The chat route carries the optional birth opener from `new`. */
 export type Route =
 	| { to: "dashboard" }

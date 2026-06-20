@@ -9,10 +9,7 @@
  */
 
 import { APP_NAME, Steward } from "@opsyhq/steward";
-import { App } from "../modes/interactive/app.ts";
-
-// A newly born agent opens the chat itself, asking its human what it is for.
-const BIRTH_OPENER = "What is my purpose?";
+import { App, BIRTH_OPENER } from "../modes/interactive/app.ts";
 
 export async function runNew(positionals: string[], model?: string): Promise<number> {
 	const steward = new Steward();
