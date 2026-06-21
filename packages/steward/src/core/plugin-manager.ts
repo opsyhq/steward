@@ -872,7 +872,9 @@ export class DefaultPluginManager implements PluginManager {
 				return;
 			}
 			if (parsed.type === "local") {
-				await this.installLocal(this.toRecordedLocalSource(source), "user");
+				// Normalize raw input to the agent-relative recorded form (the string persisted to
+				// settings) so the store key here matches the one resolution derives.
+				await this.installLocal({ type: "local", path: this.normalizePluginSourceForSettings(source) }, "user");
 				return;
 			}
 			throw new Error(`Unsupported install source: ${source}`);
@@ -896,7 +898,7 @@ export class DefaultPluginManager implements PluginManager {
 				return;
 			}
 			if (parsed.type === "local") {
-				await this.removeLocal(this.toRecordedLocalSource(source), "user");
+				await this.removeLocal({ type: "local", path: this.normalizePluginSourceForSettings(source) }, "user");
 				return;
 			}
 			throw new Error(`Unsupported remove source: ${source}`);
@@ -1281,16 +1283,6 @@ export class DefaultPluginManager implements PluginManager {
 		const resolved = this.resolvePath(parsed.path);
 		const rel = relative(baseDir, resolved);
 		return rel || ".";
-	}
-
-	/**
-	 * Convert a raw local source string (resolved against the runtime cwd) into a
-	 * `LocalSource` carrying the agent-relative recorded path — the same form persisted to
-	 * settings. install/remove use this so the store key they compute matches the one
-	 * resolution derives from the recorded source, regardless of where the command was run.
-	 */
-	private toRecordedLocalSource(source: string): LocalSource {
-		return { type: "local", path: this.normalizePluginSourceForSettings(source) };
 	}
 
 	private parseSource(source: string): ParsedSource {
@@ -1755,9 +1747,7 @@ export class DefaultPluginManager implements PluginManager {
 		this.ensureGitIgnore(this.getLocalInstallRoot(scope));
 		mkdirSync(dirname(targetDir), { recursive: true });
 		cpSync(origin, targetDir, { recursive: true });
-		// Mirror installGit's optional dependency step. Unlike git (whose installs are already
-		// gated to online by the resolve loop), a local copy self-heals even offline, so skip
-		// the dependency install when offline — it is the one part of the copy that needs the network.
+		// Install deps like installGit, but skip when offline: the copy itself needs no network.
 		const packageJsonPath = join(targetDir, "package.json");
 		if (existsSync(packageJsonPath) && !isOfflineModeEnabled()) {
 			await this.runNpmCommand(this.getGitDependencyInstallArgs(), { cwd: targetDir });
@@ -1833,7 +1823,7 @@ export class DefaultPluginManager implements PluginManager {
 	 * key stable across every form the same origin arrives in — the stored agent-relative path
 	 * (resolution / `listConfiguredPlugins`), an absolute raw path (onboarding's
 	 * `pluginRootForSpec`), and the normalized form install/remove derive via
-	 * `toRecordedLocalSource`.
+	 * `normalizePluginSourceForSettings`.
 	 */
 	private getLocalInstallPath(source: LocalSource, scope: SourceScope): string {
 		const installRoot = this.getLocalInstallRoot(scope);
