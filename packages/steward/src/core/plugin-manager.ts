@@ -1,6 +1,6 @@
 import type { ChildProcess, ChildProcessByStdio } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 
 function getEnv(): NodeJS.ProcessEnv {
@@ -96,7 +96,6 @@ export interface PluginManager {
 	removeAndPersist(source: string): Promise<boolean>;
 	update(source?: string): Promise<void>;
 	listConfiguredPlugins(): ConfiguredPlugin[];
-	resolveExtensionSources(sources: string[], options?: { temporary?: boolean }): Promise<ResolvedPaths>;
 	addSourceToSettings(source: string): boolean;
 	removeSourceFromSettings(source: string): boolean;
 	setProgressCallback(callback: ProgressCallback | undefined): void;
@@ -204,13 +203,6 @@ function toPosixPath(p: string): string {
 
 function getHomeDir(): string {
 	return process.env.HOME || homedir();
-}
-
-export function getExtensionTempFolder(agentDir: string): string {
-	const tempFolder = join(agentDir, "tmp", "extensions");
-	mkdirSync(tempFolder, { recursive: true, mode: 0o700 });
-	chmodSync(tempFolder, 0o700);
-	return tempFolder;
 }
 
 function prefixIgnorePattern(line: string, prefix: string): string | null {
@@ -788,8 +780,7 @@ export class DefaultPluginManager implements PluginManager {
 			return existsSync(path) ? path : undefined;
 		}
 		if (parsed.type === "local") {
-			const baseDir = this.getBaseDirForScope("user");
-			const path = this.resolvePathFromBase(parsed.path, baseDir);
+			const path = this.getLocalInstallPath(parsed, "user");
 			return existsSync(path) ? path : undefined;
 		}
 		return undefined;
@@ -852,14 +843,6 @@ export class DefaultPluginManager implements PluginManager {
 		return this.toResolvedPaths(accumulator);
 	}
 
-	async resolveExtensionSources(sources: string[], options?: { temporary?: boolean }): Promise<ResolvedPaths> {
-		const accumulator = this.createAccumulator();
-		const scope: SourceScope = options?.temporary ? "temporary" : "user";
-		const packageSources = sources.map((source) => ({ pkg: source as PluginSource, scope }));
-		await this.resolvePluginSources(packageSources, accumulator);
-		return this.toResolvedPaths(accumulator);
-	}
-
 	listConfiguredPlugins(): ConfiguredPlugin[] {
 		const globalSettings = this.settingsManager.getGlobalSettings();
 		const configuredPackages: ConfiguredPlugin[] = [];
@@ -881,7 +864,7 @@ export class DefaultPluginManager implements PluginManager {
 		const parsed = this.parseSource(source);
 		await this.withProgress("install", source, `Installing ${source}...`, async () => {
 			if (parsed.type === "npm") {
-				await this.installNpm(parsed, "user", false);
+				await this.installNpm(parsed, "user");
 				return;
 			}
 			if (parsed.type === "git") {
@@ -889,10 +872,8 @@ export class DefaultPluginManager implements PluginManager {
 				return;
 			}
 			if (parsed.type === "local") {
-				const resolved = this.resolvePath(parsed.path);
-				if (!existsSync(resolved)) {
-					throw new Error(`Path does not exist: ${resolved}`);
-				}
+				// Record the agent-relative form so the store key matches what resolution derives.
+				await this.installLocal({ type: "local", path: this.normalizePluginSourceForSettings(source) }, "user");
 				return;
 			}
 			throw new Error(`Unsupported install source: ${source}`);
@@ -916,6 +897,7 @@ export class DefaultPluginManager implements PluginManager {
 				return;
 			}
 			if (parsed.type === "local") {
+				await this.removeLocal({ type: "local", path: this.normalizePluginSourceForSettings(source) }, "user");
 				return;
 			}
 			throw new Error(`Unsupported remove source: ${source}`);
@@ -948,7 +930,20 @@ export class DefaultPluginManager implements PluginManager {
 	}
 
 	private async updateConfiguredSources(sources: ConfiguredUpdateSource[]): Promise<void> {
-		if (isOfflineModeEnabled() || sources.length === 0) {
+		if (sources.length === 0) {
+			return;
+		}
+
+		// Local re-copy is a filesystem op, so it runs even offline — unlike the npm/git fetch below.
+		for (const entry of sources) {
+			const parsed = this.parseSource(entry.source);
+			if (parsed.type !== "local") continue;
+			await this.withProgress("update", entry.source, `Updating ${entry.source}...`, async () => {
+				await this.updateLocal(parsed, entry.scope);
+			});
+		}
+
+		if (isOfflineModeEnabled()) {
 			return;
 		}
 
@@ -1029,7 +1024,7 @@ export class DefaultPluginManager implements PluginManager {
 	}
 
 	private async installNpmBatch(specs: string[], scope: InstalledSourceScope): Promise<void> {
-		const installRoot = this.getNpmInstallRoot(scope, false);
+		const installRoot = this.getNpmInstallRoot(scope);
 		this.ensureNpmProject(installRoot);
 		await this.runNpmCommand(this.getNpmInstallArgs(specs, installRoot));
 	}
@@ -1103,14 +1098,9 @@ export class DefaultPluginManager implements PluginManager {
 			const parsed = this.parseSource(sourceStr);
 			const metadata: PathMetadata = { source: sourceStr, scope, origin: "package" };
 
-			if (parsed.type === "local") {
-				const baseDir = this.getBaseDirForScope(scope);
-				this.resolveLocalExtensionSource(parsed, accumulator, filter, metadata, baseDir);
-				continue;
-			}
-
 			const installMissing = async (): Promise<boolean> => {
-				if (isOfflineModeEnabled()) {
+				// Local is a filesystem copy — only npm/git are gated by offline mode.
+				if (parsed.type !== "local" && isOfflineModeEnabled()) {
 					return false;
 				}
 				if (!onMissing) {
@@ -1123,6 +1113,19 @@ export class DefaultPluginManager implements PluginManager {
 				await this.installParsedSource(parsed, scope);
 				return true;
 			};
+
+			if (parsed.type === "local") {
+				const installedPath = this.getLocalInstallPath(parsed, scope);
+				if (!existsSync(installedPath)) {
+					// Self-heal on first resolve; skip quietly if the origin is gone (stay resilient).
+					const origin = this.resolvePathFromBase(parsed.path, this.getBaseDirForScope(scope));
+					if (!existsSync(origin)) continue;
+					const installed = await installMissing();
+					if (!installed) continue;
+				}
+				this.resolveLocalStore(installedPath, accumulator, filter, metadata);
+				continue;
+			}
 
 			if (parsed.type === "npm") {
 				let installedPath = this.getNpmInstallPath(parsed, scope);
@@ -1144,8 +1147,6 @@ export class DefaultPluginManager implements PluginManager {
 				if (!existsSync(installedPath)) {
 					const installed = await installMissing();
 					if (!installed) continue;
-				} else if (scope === "temporary" && !parsed.pinned && !isOfflineModeEnabled()) {
-					await this.refreshTemporaryGitSource(parsed, sourceStr);
 				}
 				metadata.baseDir = installedPath;
 				this.collectPackageResources(installedPath, accumulator, filter, metadata);
@@ -1153,30 +1154,29 @@ export class DefaultPluginManager implements PluginManager {
 		}
 	}
 
-	private resolveLocalExtensionSource(
-		source: LocalSource,
+	// Resolve resources from the copied store path; a bare file or manifest-less dir is one extension.
+	private resolveLocalStore(
+		storePath: string,
 		accumulator: ResourceAccumulator,
 		filter: PluginFilter | undefined,
 		metadata: PathMetadata,
-		baseDir: string,
 	): void {
-		const resolved = this.resolvePathFromBase(source.path, baseDir);
-		if (!existsSync(resolved)) {
+		if (!existsSync(storePath)) {
 			return;
 		}
 
 		try {
-			const stats = statSync(resolved);
+			const stats = statSync(storePath);
 			if (stats.isFile()) {
-				metadata.baseDir = dirname(resolved);
-				this.addResource(accumulator.extensions, resolved, metadata, true);
+				metadata.baseDir = dirname(storePath);
+				this.addResource(accumulator.extensions, storePath, metadata, true);
 				return;
 			}
 			if (stats.isDirectory()) {
-				metadata.baseDir = resolved;
-				const resources = this.collectPackageResources(resolved, accumulator, filter, metadata);
+				metadata.baseDir = storePath;
+				const resources = this.collectPackageResources(storePath, accumulator, filter, metadata);
 				if (!resources) {
-					this.addResource(accumulator.extensions, resolved, metadata, true);
+					this.addResource(accumulator.extensions, storePath, metadata, true);
 				}
 			}
 		} catch {
@@ -1186,11 +1186,15 @@ export class DefaultPluginManager implements PluginManager {
 
 	private async installParsedSource(parsed: ParsedSource, scope: SourceScope): Promise<void> {
 		if (parsed.type === "npm") {
-			await this.installNpm(parsed, scope, scope === "temporary");
+			await this.installNpm(parsed, scope);
 			return;
 		}
 		if (parsed.type === "git") {
 			await this.installGit(parsed, scope);
+			return;
+		}
+		if (parsed.type === "local") {
+			await this.installLocal(parsed, scope);
 			return;
 		}
 	}
@@ -1604,14 +1608,14 @@ export class DefaultPluginManager implements PluginManager {
 		return ["install", ...specs, "--prefix", installRoot, "--legacy-peer-deps"];
 	}
 
-	private async installNpm(source: NpmSource, scope: SourceScope, temporary: boolean): Promise<void> {
-		const installRoot = this.getNpmInstallRoot(scope, temporary);
+	private async installNpm(source: NpmSource, scope: SourceScope): Promise<void> {
+		const installRoot = this.getNpmInstallRoot(scope);
 		this.ensureNpmProject(installRoot);
 		await this.runNpmCommand(this.getNpmInstallArgs([source.spec], installRoot));
 	}
 
 	private async uninstallNpm(source: NpmSource, scope: SourceScope): Promise<void> {
-		const installRoot = this.getNpmInstallRoot(scope, false);
+		const installRoot = this.getNpmInstallRoot(scope);
 		if (!existsSync(installRoot)) {
 			return;
 		}
@@ -1633,10 +1637,7 @@ export class DefaultPluginManager implements PluginManager {
 			await this.ensureGitRef(targetDir, target.fetchArgs, target.ref);
 			return;
 		}
-		const gitRoot = this.getGitInstallRoot(scope);
-		if (gitRoot) {
-			this.ensureGitIgnore(gitRoot);
-		}
+		this.ensureGitIgnore(this.getGitInstallRoot(scope));
 		mkdirSync(dirname(targetDir), { recursive: true });
 
 		await this.runCommand("git", ["clone", source.repo, targetDir]);
@@ -1693,28 +1694,14 @@ export class DefaultPluginManager implements PluginManager {
 		}
 	}
 
-	private async refreshTemporaryGitSource(source: GitSource, sourceStr: string): Promise<void> {
-		if (isOfflineModeEnabled()) {
-			return;
-		}
-		try {
-			await this.withProgress("pull", sourceStr, `Refreshing ${sourceStr}...`, async () => {
-				await this.updateGit(source, "temporary");
-			});
-		} catch {
-			// Keep cached temporary checkout if refresh fails.
-		}
-	}
-
 	private async removeGit(source: GitSource, scope: SourceScope): Promise<void> {
 		const targetDir = this.getGitInstallPath(source, scope);
 		if (!existsSync(targetDir)) return;
 		rmSync(targetDir, { recursive: true, force: true });
-		this.pruneEmptyGitParents(targetDir, this.getGitInstallRoot(scope));
+		this.pruneEmptyParents(targetDir, this.getGitInstallRoot(scope));
 	}
 
-	private pruneEmptyGitParents(targetDir: string, installRoot: string | undefined): void {
-		if (!installRoot) return;
+	private pruneEmptyParents(targetDir: string, installRoot: string): void {
 		const resolvedRoot = resolve(installRoot);
 		let current = dirname(targetDir);
 		while (current.startsWith(resolvedRoot) && current !== resolvedRoot) {
@@ -1733,6 +1720,36 @@ export class DefaultPluginManager implements PluginManager {
 			}
 			current = dirname(current);
 		}
+	}
+
+	private async installLocal(source: LocalSource, scope: SourceScope): Promise<void> {
+		// Mirrors installGit; the store is deliberately not cloud-sync-ignored (the copy must travel).
+		const origin = this.resolvePathFromBase(source.path, this.getBaseDirForScope(scope));
+		if (!existsSync(origin)) {
+			throw new Error(`Path does not exist: ${origin}`);
+		}
+		const targetDir = this.getLocalInstallPath(source, scope);
+		this.ensureGitIgnore(this.getLocalInstallRoot(scope));
+		mkdirSync(dirname(targetDir), { recursive: true });
+		cpSync(origin, targetDir, { recursive: true });
+		// Install deps like installGit, but skip when offline: the copy itself needs no network.
+		const packageJsonPath = join(targetDir, "package.json");
+		if (existsSync(packageJsonPath) && !isOfflineModeEnabled()) {
+			await this.runNpmCommand(this.getGitDependencyInstallArgs(), { cwd: targetDir });
+		}
+	}
+
+	private async updateLocal(source: LocalSource, scope: SourceScope): Promise<void> {
+		const targetDir = this.getLocalInstallPath(source, scope);
+		rmSync(targetDir, { recursive: true, force: true });
+		await this.installLocal(source, scope);
+	}
+
+	private async removeLocal(source: LocalSource, scope: SourceScope): Promise<void> {
+		const targetDir = this.getLocalInstallPath(source, scope);
+		if (!existsSync(targetDir)) return;
+		rmSync(targetDir, { recursive: true, force: true });
+		this.pruneEmptyParents(targetDir, this.getLocalInstallRoot(scope));
 	}
 
 	private ensureNpmProject(installRoot: string): void {
@@ -1758,18 +1775,12 @@ export class DefaultPluginManager implements PluginManager {
 		}
 	}
 
-	private getNpmInstallRoot(_scope: SourceScope, temporary: boolean): string {
-		if (temporary) {
-			return this.getTemporaryDir("npm");
-		}
-		return join(this.agentDir, "npm");
+	private getNpmInstallRoot(_scope: SourceScope): string {
+		return join(this.agentDir, ".plugins", "npm");
 	}
 
-	private getManagedNpmInstallPath(source: NpmSource, scope: SourceScope): string {
-		if (scope === "temporary") {
-			return join(this.getTemporaryDir("npm"), "node_modules", source.name);
-		}
-		return join(this.agentDir, "npm", "node_modules", source.name);
+	private getManagedNpmInstallPath(source: NpmSource, _scope: SourceScope): string {
+		return join(this.agentDir, ".plugins", "npm", "node_modules", source.name);
 	}
 
 	private getNpmInstallPath(source: NpmSource, scope: SourceScope): string {
@@ -1777,30 +1788,35 @@ export class DefaultPluginManager implements PluginManager {
 	}
 
 	private getGitInstallPath(source: GitSource, scope: SourceScope): string {
-		if (scope === "temporary") {
-			return this.getTemporaryDir(`git-${source.host}`, source.path);
-		}
 		const installRoot = this.getGitInstallRoot(scope);
-		if (!installRoot) {
-			throw new Error("Missing git install root");
-		}
 		return this.resolveManagedPath(installRoot, source.host, source.path);
 	}
 
-	private getGitInstallRoot(scope: SourceScope): string | undefined {
-		if (scope === "temporary") {
-			return undefined;
-		}
-		return join(this.agentDir, "git");
+	private getGitInstallRoot(_scope: SourceScope): string {
+		return join(this.agentDir, ".plugins", "git");
 	}
 
-	private getTemporaryDir(prefix: string, suffix?: string): string {
-		const root = this.resolveManagedPath(getExtensionTempFolder(this.agentDir), prefix);
-		const hash = createHash("sha256")
-			.update(`${prefix}-${suffix ?? ""}`)
-			.digest("hex")
-			.slice(0, 8);
-		return this.resolveManagedPath(root, hash, suffix ?? "");
+	private getLocalInstallRoot(_scope: SourceScope): string {
+		return join(this.agentDir, ".plugins", "local");
+	}
+
+	// Keys on the resolved absolute origin so every form of the same origin maps to one store dir.
+	private getLocalInstallPath(source: LocalSource, scope: SourceScope): string {
+		const installRoot = this.getLocalInstallRoot(scope);
+		const origin = this.resolvePathFromBase(source.path, this.getBaseDirForScope(scope));
+		return this.resolveManagedPath(installRoot, this.localSourceKey(origin));
+	}
+
+	// Readable basename slug + a hash of the full path so distinct origins never collide.
+	private localSourceKey(absoluteOrigin: string): string {
+		const normalized = toPosixPath(absoluteOrigin).replace(/\/+$/, "") || "/";
+		const hash = createHash("sha256").update(normalized).digest("hex").slice(0, 12);
+		const slug =
+			basename(normalized)
+				.replace(/[^a-zA-Z0-9._-]/g, "-")
+				.replace(/^[.]+/, "")
+				.slice(0, 40) || "local";
+		return `${slug}-${hash}`;
 	}
 
 	private resolveManagedPath(root: string, ...parts: string[]): string {
@@ -1812,12 +1828,9 @@ export class DefaultPluginManager implements PluginManager {
 		return resolvedPath;
 	}
 
-	private getBaseDirForScope(scope: SourceScope): string {
-		if (scope === "user") {
-			return this.agentDir;
-		}
-		// "temporary" — CLI-supplied sources resolve against the runtime cwd.
-		return this.cwd;
+	private getBaseDirForScope(_scope: SourceScope): string {
+		// Steward is per-agent only: the agent home is the single install/resolve base.
+		return this.agentDir;
 	}
 
 	private resolvePath(input: string): string {
