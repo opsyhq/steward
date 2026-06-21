@@ -31,5 +31,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "model", description: "Switch the active model" },
 	{ name: "thinking", description: "Set the thinking level" },
 	{ name: "scoped-models", description: "Configure the session model shortlist" },
+	{ name: "login", description: "Log in to a model provider" },
+	{ name: "logout", description: "Log out of a model provider" },
 	{ name: "quit", description: `Quit ${APP_NAME}` },
 ];

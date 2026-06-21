@@ -578,6 +578,18 @@ export class ChatView extends Container implements AppView {
 			await this.handleThinkingCommand(level);
 			return;
 		}
+		// `/login` — pick an auth method + provider, then run the login daemon-side.
+		if (trimmed === "/login") {
+			this.editor.setText("");
+			await this.handleLoginCommand();
+			return;
+		}
+		// `/logout` — pick a provider with stored credentials and remove it.
+		if (trimmed === "/logout") {
+			this.editor.setText("");
+			await this.handleLogoutCommand();
+			return;
+		}
 
 		// Handle bash command (! for normal, !! for excluded from context)
 		if (text.startsWith("!")) {
@@ -935,6 +947,94 @@ export class ChatView extends Container implements AppView {
 				},
 			);
 			return { component: selector, focus: selector.getSelectList() };
+		});
+	}
+
+	/**
+	 * `/login` — pick an auth method, then a provider, then run the login. OAuth providers prompt
+	 * mid-call via the existing `extension_ui_request` round-trip (rendered by `dispatchUiRequest`);
+	 * on success the new provider's models become selectable via `/model`.
+	 */
+	private async handleLoginCommand(): Promise<void> {
+		const subscriptionLabel = "Use a subscription";
+		const apiKeyLabel = "Use an API key";
+		this.showSelector((done) => {
+			const selector = new ExtensionSelectorComponent(
+				"Select authentication method:",
+				[subscriptionLabel, apiKeyLabel],
+				(option) => {
+					done();
+					void this.showLoginProviderSelector(option === subscriptionLabel ? "oauth" : "api_key");
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	private async showLoginProviderSelector(authType: "oauth" | "api_key"): Promise<void> {
+		const providers = await this.session.getLoginProviderOptions(authType);
+		if (providers.length === 0) {
+			this.showStatus(
+				authType === "oauth" ? "No subscription providers available." : "No API key providers available.",
+			);
+			return;
+		}
+		this.showSelector((done) => {
+			const selector = new ExtensionSelectorComponent(
+				"Select a provider:",
+				providers.map((provider) => provider.name),
+				async (label) => {
+					done();
+					const provider = providers.find((p) => p.name === label);
+					if (!provider) return;
+					try {
+						await this.session.login(provider.id, provider.authType);
+						this.showStatus(`Logged in to ${provider.name}.`);
+					} catch (error) {
+						this.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	/** `/logout` — pick a provider with stored credentials and remove it. */
+	private async handleLogoutCommand(): Promise<void> {
+		const providers = await this.session.getLogoutProviderOptions();
+		if (providers.length === 0) {
+			this.showStatus("No stored credentials to remove.");
+			return;
+		}
+		this.showSelector((done) => {
+			const selector = new ExtensionSelectorComponent(
+				"Log out of which provider?",
+				providers.map((provider) => provider.name),
+				async (label) => {
+					done();
+					const provider = providers.find((p) => p.name === label);
+					if (!provider) return;
+					try {
+						await this.session.logout(provider.id);
+						this.showStatus(`Logged out of ${provider.name}.`);
+					} catch (error) {
+						this.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector };
 		});
 	}
 

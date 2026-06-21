@@ -38,6 +38,7 @@ import { getServiceManager } from "./core/service/service-manager.ts";
 import type { ContextInfo, IntegrationInfo } from "./core/session-host.ts";
 import type { Skill } from "./core/skills.ts";
 import type {
+	AuthSelectorProvider,
 	DaemonCommand,
 	DaemonResponse,
 	DaemonSessionState,
@@ -357,6 +358,30 @@ export class AgentSession {
 	/** Switch the live model; the daemon resolves the pair, persists the default, and emits model_update. */
 	setModel(provider: string, modelId: string): Promise<Model<Api>> {
 		return this.send({ type: "set_model", provider, modelId });
+	}
+
+	/** Login-eligible providers the daemon exposes, optionally filtered to a single auth type. */
+	async getLoginProviderOptions(authType?: "oauth" | "api_key"): Promise<AuthSelectorProvider[]> {
+		return (await this.send<{ providers: AuthSelectorProvider[] }>({ type: "get_login_providers", authType }))
+			.providers;
+	}
+
+	/** Providers with a stored credential — the logout candidates. */
+	async getLogoutProviderOptions(): Promise<AuthSelectorProvider[]> {
+		return (await this.send<{ providers: AuthSelectorProvider[] }>({ type: "get_logout_providers" })).providers;
+	}
+
+	/**
+	 * Run a provider login. The daemon drives the flow server-side (credentials never cross the wire);
+	 * OAuth prompts arrive as `extension_ui_request` events and round-trip via `respondUi`.
+	 */
+	login(provider: string, authType: "oauth" | "api_key"): Promise<void> {
+		return this.send({ type: "login", provider, authType });
+	}
+
+	/** Remove a provider's stored credential daemon-side. */
+	logout(provider: string): Promise<void> {
+		return this.send({ type: "logout", provider });
 	}
 
 	/** The live model from the cached snapshot (kept fresh by the model_update frame). */

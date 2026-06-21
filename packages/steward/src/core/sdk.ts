@@ -17,8 +17,10 @@ import {
 	type Session,
 	type ThinkingLevel,
 } from "@opsyhq/agent";
-import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
+import type { ModelRegistry } from "./model-registry.ts";
+import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
+import type { SettingsManager } from "./settings-manager.ts";
 
 export interface CreateAgentSessionOptions {
 	env: ExecutionEnv;
@@ -34,8 +36,12 @@ export interface CreateAgentSessionOptions {
 	 * harness shapes by the caller.
 	 */
 	resources?: AgentHarnessResources;
-	/** Shared credential store. Default: `AuthStorage.create()`. */
-	authStorage?: AuthStorage;
+	/** Model registry that resolves request-time auth (api keys + per-model/provider headers). */
+	modelRegistry: ModelRegistry;
+	/** Settings manager, read for provider-attribution headers. */
+	settingsManager: SettingsManager;
+	/** Session id, threaded into provider-attribution session headers. */
+	sessionId: string;
 }
 
 export interface CreateAgentSessionResult {
@@ -43,24 +49,32 @@ export interface CreateAgentSessionResult {
 }
 
 /**
- * Resolve a provider API key from the shared credential store, then headers.
+ * Resolve request-time auth + headers through the `ModelRegistry`, then merge in
+ * provider-attribution headers.
  *
- * `getApiKey` checks runtime overrides → auth.json (api keys + OAuth,
- * auto-refreshing tokens) → env vars, so a Codex OAuth login or an
- * `ANTHROPIC_API_KEY` both resolve. The apiKey alone suffices — the provider
- * derives the account id and request headers from it (e.g. the
- * `openai-codex-responses` provider).
+ * Routing through `ModelRegistry.getApiKeyAndHeaders` (rather than reading the
+ * api key straight off `AuthStorage`) is what carries custom `models.json` keys,
+ * per-model/provider headers, and `Authorization: Bearer` auth. The harness
+ * callback contract is `apiKey: string`, so a keyless (header-only) provider is
+ * rejected here — no steward provider is keyless today.
  */
 async function getApiKeyAndHeaders(
-	authStorage: AuthStorage,
+	modelRegistry: ModelRegistry,
+	settingsManager: SettingsManager,
+	sessionId: string,
 	model: Model<Api>,
-): Promise<{ apiKey: string; headers?: Record<string, string> } | undefined> {
-	const apiKey = await authStorage.getApiKey(model.provider);
-	return apiKey ? { apiKey } : undefined;
+): Promise<{ apiKey: string; headers?: Record<string, string> }> {
+	const auth = await modelRegistry.getApiKeyAndHeaders(model);
+	if (!auth.ok) throw new Error(auth.error);
+	if (!auth.apiKey) throw new Error(`No API key for "${model.provider}"`);
+	return {
+		apiKey: auth.apiKey,
+		headers: mergeProviderAttributionHeaders(model, settingsManager, sessionId, auth.headers),
+	};
 }
 
 export async function createAgentSession(options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> {
-	const authStorage = options.authStorage ?? AuthStorage.create();
+	const { modelRegistry, settingsManager, sessionId } = options;
 	const harness = new AgentHarness({
 		env: options.env,
 		session: options.session,
@@ -69,7 +83,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions): Pr
 		systemPrompt: () => options.systemPrompt,
 		tools: options.tools,
 		resources: options.resources,
-		getApiKeyAndHeaders: (model) => getApiKeyAndHeaders(authStorage, model),
+		getApiKeyAndHeaders: (model) => getApiKeyAndHeaders(modelRegistry, settingsManager, sessionId, model),
 	});
 	return { harness };
 }

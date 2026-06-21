@@ -10,7 +10,7 @@ import { type Api, type KnownProvider, type Model, modelsAreEqual } from "@earen
 import type { ThinkingLevel } from "@opsyhq/agent";
 import chalk from "chalk";
 import { minimatch } from "minimatch";
-import { isValidThinkingLevel } from "./defaults.ts";
+import { DEFAULT_THINKING_LEVEL, isValidThinkingLevel } from "./defaults.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 
 /** Default model IDs for each known provider */
@@ -439,4 +439,95 @@ export function resolveCliModel(options: {
 		warning,
 		error: `Model "${display}" not found.`,
 	};
+}
+
+export interface InitialModelResult {
+	model: Model<Api> | undefined;
+	thinkingLevel: ThinkingLevel;
+	fallbackMessage: string | undefined;
+}
+
+/**
+ * Find the initial model to use based on priority:
+ * 1. CLI args (provider + model)
+ * 2. First model from scoped models (if not continuing/resuming)
+ * 3. Saved default from settings
+ * 4. First available model with valid API key
+ */
+export async function findInitialModel(options: {
+	cliProvider?: string;
+	cliModel?: string;
+	scopedModels: ScopedModel[];
+	isContinuing: boolean;
+	defaultProvider?: string;
+	defaultModelId?: string;
+	defaultThinkingLevel?: ThinkingLevel;
+	modelRegistry: ModelRegistry;
+}): Promise<InitialModelResult> {
+	const {
+		cliProvider,
+		cliModel,
+		scopedModels,
+		isContinuing,
+		defaultProvider,
+		defaultModelId,
+		defaultThinkingLevel,
+		modelRegistry,
+	} = options;
+
+	let model: Model<Api> | undefined;
+	let thinkingLevel: ThinkingLevel = DEFAULT_THINKING_LEVEL;
+
+	// 1. CLI args take priority
+	if (cliProvider && cliModel) {
+		const resolved = resolveCliModel({
+			cliProvider,
+			cliModel,
+			modelRegistry,
+		});
+		if (resolved.model) {
+			return { model: resolved.model, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
+		}
+	}
+
+	// 2. Use first model from scoped models (skip if continuing/resuming)
+	if (scopedModels.length > 0 && !isContinuing) {
+		return {
+			model: scopedModels[0].model,
+			thinkingLevel: scopedModels[0].thinkingLevel ?? defaultThinkingLevel ?? DEFAULT_THINKING_LEVEL,
+			fallbackMessage: undefined,
+		};
+	}
+
+	// 3. Try saved default from settings
+	if (defaultProvider && defaultModelId) {
+		const found = modelRegistry.find(defaultProvider, defaultModelId);
+		if (found) {
+			model = found;
+			if (defaultThinkingLevel) {
+				thinkingLevel = defaultThinkingLevel;
+			}
+			return { model, thinkingLevel, fallbackMessage: undefined };
+		}
+	}
+
+	// 4. Try first available model with valid API key
+	const availableModels = await modelRegistry.getAvailable();
+
+	if (availableModels.length > 0) {
+		// Try to find a default model from known providers
+		for (const provider of Object.keys(defaultModelPerProvider) as KnownProvider[]) {
+			const defaultId = defaultModelPerProvider[provider];
+			const match = availableModels.find((m) => m.provider === provider && m.id === defaultId);
+			if (match) {
+				return { model: match, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
+			}
+		}
+
+		// If no default found, use first available
+		return { model: availableModels[0], thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
+	}
+
+	// 5. No model found
+	return { model: undefined, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
 }
