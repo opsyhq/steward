@@ -120,13 +120,19 @@ const registrations: Array<{ unregister(): void }> = [];
 function makeHost(): { host: SessionHost; registration: ReturnType<typeof registerFauxProvider> } {
 	const registration = registerFauxProvider();
 	registrations.push(registration);
+	// Faux models are typed Model<string>; the host wants Model<Api> (Api is a
+	// string supertype) — the cast bridges the faux test double to the real shape.
+	const model = registration.getModel() as unknown as Model<Api>;
+	const authStorage = AuthStorage.create(join(sharedDir, "auth.json"));
+	// Request-time auth routes through ModelRegistry, which requires a resolvable API
+	// key; the faux provider has none, so inject a runtime override (stands in for a
+	// real provider being authed).
+	authStorage.setRuntimeApiKey(model.provider, "faux-test-key");
 	const host = new SessionHost({
 		name: AGENT,
-		// Faux models are typed Model<string>; the host wants Model<Api> (Api is a
-		// string supertype) — the cast bridges the faux test double to the real shape.
-		model: registration.getModel() as unknown as Model<Api>,
+		model,
 		thinkingLevel: "off",
-		authStorage: AuthStorage.create(join(sharedDir, "auth.json")),
+		authStorage,
 		integrationAccounts: IntegrationAccountStorage.inMemory(),
 	});
 	return { host, registration };

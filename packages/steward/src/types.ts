@@ -78,7 +78,14 @@ export type DaemonCommand =
 	// Scoped models — `set_scoped_models` switches the session-only scope (daemon resolves the
 	// patterns against its private registry); `set_enabled_models` persists the agent-tier shortlist.
 	| { id?: string; type: "set_scoped_models"; enabledModelIds: string[] }
-	| { id?: string; type: "set_enabled_models"; enabledModels?: string[] };
+	| { id?: string; type: "set_enabled_models"; enabledModels?: string[] }
+
+	// Provider login — driven daemon-side so credentials never cross the wire; the OAuth flow
+	// prompts the client over the existing uiContext dialog seam.
+	| { id?: string; type: "login"; provider: string; authType: "oauth" | "api_key" }
+	| { id?: string; type: "logout"; provider: string }
+	| { id?: string; type: "get_login_providers"; authType?: "oauth" | "api_key" }
+	| { id?: string; type: "get_logout_providers" };
 
 export type DaemonCommandType = DaemonCommand["type"];
 
@@ -95,6 +102,13 @@ export interface OnboardServiceResult {
 	status: OnboardIntegrationResult["status"];
 	message?: string;
 }
+
+/** A login/logout-eligible provider: its id, display name, and how it authenticates. */
+export type AuthSelectorProvider = {
+	id: string;
+	name: string;
+	authType: "oauth" | "api_key";
+};
 
 /** A generic success arm (`data` is the verb-specific payload) plus the shared error arm. */
 export type DaemonResponse =

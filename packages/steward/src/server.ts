@@ -25,7 +25,6 @@ import { agentExists, deployAgent, loadAgentConfig } from "./core/agent-config.t
 import { createAgentPluginManager } from "./core/agent-plugin-manager.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
 import { loadDaemonConfig, saveDaemonConfig } from "./core/daemon-config.ts";
-import { DEFAULT_MODEL, DEFAULT_THINKING_LEVEL } from "./core/defaults.ts";
 import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -37,7 +36,7 @@ import { loadIntegrations } from "./core/integrations/loader.ts";
 import { onboardIntegration } from "./core/integrations/onboarding.ts";
 import type { Integration, IntegrationOnboardUI } from "./core/integrations/types.ts";
 import { ModelRegistry } from "./core/model-registry.ts";
-import { resolveCliModel } from "./core/model-resolver.ts";
+import { findInitialModel } from "./core/model-resolver.ts";
 import type { DefaultPluginManager } from "./core/plugin-manager.ts";
 import { getServiceManager } from "./core/service/service-manager.ts";
 import { SessionHost } from "./core/session-host.ts";
@@ -240,6 +239,16 @@ async function handleCommand(host: SessionHost, cmd: DaemonCommand): Promise<Dae
 			host.setEnabledModels(cmd.enabledModels);
 			return ok(id, "set_enabled_models");
 
+		// Provider login — runs daemon-side; OAuth prompts ride the uiContext dialog seam.
+		case "login":
+			return ok(id, "login", await host.login(cmd.provider, cmd.authType));
+		case "logout":
+			return ok(id, "logout", host.logout(cmd.provider));
+		case "get_login_providers":
+			return ok(id, "get_login_providers", { providers: host.getLoginProviderOptions(cmd.authType) });
+		case "get_logout_providers":
+			return ok(id, "get_logout_providers", { providers: host.getLogoutProviderOptions() });
+
 		// State
 		case "get_state":
 			return ok(id, "get_state", snapshot(host));
@@ -322,7 +331,7 @@ async function handleCommand(host: SessionHost, cmd: DaemonCommand): Promise<Dae
  * Returns the unstarted `host`, or an `{ error }` for the model/auth failures that should print to
  * stderr and exit 1.
  */
-function createAgentSessionHost(name: string): { host: SessionHost } | { error: string } {
+async function createAgentSessionHost(name: string): Promise<{ host: SessionHost } | { error: string }> {
 	const config = loadAgentConfig(name);
 
 	const authStorage = AuthStorage.create();
@@ -330,16 +339,20 @@ function createAgentSessionHost(name: string): { host: SessionHost } | { error: 
 	const integrationAccounts = IntegrationAccountStorage.create(name);
 	const modelRegistry = ModelRegistry.create(authStorage);
 
-	// Model precedence: agent.json → shared default → built-in.
-	const resolved = resolveCliModel({
-		cliModel: config.model ?? sharedDefaultModel() ?? DEFAULT_MODEL,
+	// Model precedence: agent.json → shared default → known-provider defaults → first-available.
+	const savedModel = config.model ?? sharedDefaultModel();
+	const slashIndex = savedModel?.indexOf("/") ?? -1;
+	const defaultProvider = savedModel && slashIndex !== -1 ? savedModel.slice(0, slashIndex) : undefined;
+	const defaultModelId = savedModel ? (slashIndex !== -1 ? savedModel.slice(slashIndex + 1) : savedModel) : undefined;
+	const resolved = await findInitialModel({
+		scopedModels: [],
+		isContinuing: false,
+		defaultProvider,
+		defaultModelId,
 		modelRegistry,
 	});
-	if (resolved.warning) {
-		process.stderr.write(`${resolved.warning}\n`);
-	}
-	if (resolved.error || !resolved.model) {
-		return { error: resolved.error ?? "Could not resolve a model." };
+	if (!resolved.model) {
+		return { error: `No model available for agent "${name}". Log in with the steward CLI.` };
 	}
 	const model = resolved.model;
 
@@ -351,7 +364,7 @@ function createAgentSessionHost(name: string): { host: SessionHost } | { error: 
 		return { error: `No credentials found for provider "${model.provider}". Log in with the steward CLI.` };
 	}
 
-	const thinkingLevel = resolved.thinkingLevel ?? DEFAULT_THINKING_LEVEL;
+	const thinkingLevel = resolved.thinkingLevel;
 	const host = new SessionHost({ name, model, thinkingLevel, authStorage, integrationAccounts });
 	return { host };
 }
@@ -374,7 +387,7 @@ export async function runDaemon(name: string, opts: RunDaemonOptions = {}): Prom
 		return 1;
 	}
 
-	const built = createAgentSessionHost(name);
+	const built = await createAgentSessionHost(name);
 	if ("error" in built) {
 		process.stderr.write(`${built.error}\n`);
 		return 1;

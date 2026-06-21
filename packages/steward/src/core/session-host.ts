@@ -27,7 +27,16 @@
 
 import { readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import type { Api, AssistantMessage, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
+import type {
+	Api,
+	AssistantMessage,
+	ImageContent,
+	Model,
+	OAuthLoginCallbacks,
+	OAuthProviderId,
+	OAuthSelectPrompt,
+	TextContent,
+} from "@earendil-works/pi-ai";
 import {
 	type AgentHarness,
 	type AgentHarnessResources,
@@ -42,7 +51,9 @@ import {
 } from "@opsyhq/agent";
 import type { NodeExecutionEnv } from "@opsyhq/agent/node";
 import { getAgentDir, getAgentIntegrationsPath } from "../config.ts";
+import type { AuthSelectorProvider } from "../types.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
+import { openBrowser } from "../utils/open-browser.ts";
 import { type AgentConfig, isDeployed, loadAgentConfig, saveAgentConfig } from "./agent-config.ts";
 import { createAgentPluginManager } from "./agent-plugin-manager.ts";
 import type { AuthStorage } from "./auth-storage.ts";
@@ -64,7 +75,7 @@ import type { IntegrationAccountStorage } from "./integration-account-storage.ts
 import { IntegrationRunner } from "./integrations/runner.ts";
 import { loadMemory } from "./memory.ts";
 import { type CustomMessage, createCustomMessage } from "./messages.ts";
-import { ModelRegistry } from "./model-registry.ts";
+import { isApiKeyLoginProvider, ModelRegistry } from "./model-registry.ts";
 import { resolveModelScope, type ScopedModel } from "./model-resolver.ts";
 import type { ConfiguredPlugin } from "./plugin-manager.ts";
 import { type PromptTemplate, parseCommandArgs } from "./prompt-templates.ts";
@@ -602,6 +613,7 @@ export class SessionHost {
 				name: this.options.name,
 				sessionManager: this._sessionManager!,
 				modelRegistry: this._modelRegistry!,
+				settingsManager: SettingsManager.create(agentDir, agentDir),
 				discoverReason: "reload",
 				seedFlagValues: previousFlagValues,
 			});
@@ -907,6 +919,108 @@ export class SessionHost {
 	}
 
 	/**
+	 * Login-eligible providers: every OAuth provider, plus every model provider that authenticates
+	 * by API key (built-in providers with a display name, or non-built-in providers without OAuth).
+	 * Optionally filtered to a single auth type. Named to match coding-agent's method.
+	 */
+	getLoginProviderOptions(authType?: "oauth" | "api_key"): AuthSelectorProvider[] {
+		if (!this._modelRegistry) throw new Error("SessionHost not started.");
+		const authStorage = this.options.authStorage;
+		const oauthProviders = authStorage.getOAuthProviders();
+		const oauthProviderIds = new Set(oauthProviders.map((provider) => provider.id));
+		const options: AuthSelectorProvider[] = oauthProviders.map((provider) => ({
+			id: provider.id,
+			name: provider.name,
+			authType: "oauth",
+		}));
+
+		const modelProviders = new Set(this._modelRegistry.getAll().map((model) => model.provider));
+		for (const providerId of modelProviders) {
+			if (!isApiKeyLoginProvider(providerId, oauthProviderIds)) {
+				continue;
+			}
+			options.push({
+				id: providerId,
+				name: this._modelRegistry.getProviderDisplayName(providerId),
+				authType: "api_key",
+			});
+		}
+
+		const filteredOptions = authType ? options.filter((option) => option.authType === authType) : options;
+		return filteredOptions.sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	/** Providers with a stored credential — the logout candidates. Named to match coding-agent's method. */
+	getLogoutProviderOptions(): AuthSelectorProvider[] {
+		if (!this._modelRegistry) throw new Error("SessionHost not started.");
+		const authStorage = this.options.authStorage;
+		const options: AuthSelectorProvider[] = [];
+
+		for (const providerId of authStorage.list()) {
+			const credential = authStorage.get(providerId);
+			if (!credential) {
+				continue;
+			}
+			options.push({
+				id: providerId,
+				name: this._modelRegistry.getProviderDisplayName(providerId),
+				authType: credential.type,
+			});
+		}
+
+		return options.sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	/**
+	 * Run a provider login daemon-side, prompting the client over the bound uiContext. OAuth flows
+	 * open the browser on the daemon host (where local-callback-server providers bind) and route
+	 * `onPrompt`/`onSelect` through the dialog seam; API-key flows read the key via `ui.input`.
+	 * Refreshes the registry afterward so the new credential's models become selectable.
+	 */
+	async login(provider: string, authType: "oauth" | "api_key"): Promise<void> {
+		if (!this._modelRegistry) throw new Error("SessionHost not started.");
+		const ui = this.extensionRunner.getUIContext();
+		const name = this._modelRegistry.getProviderDisplayName(provider);
+
+		if (authType === "oauth") {
+			const callbacks: OAuthLoginCallbacks = {
+				onAuth: (info) => {
+					openBrowser(info.url);
+					ui.notify(info.instructions ? `${info.url}\n${info.instructions}` : info.url);
+				},
+				onDeviceCode: (info) => {
+					ui.notify(`Enter code ${info.userCode} at ${info.verificationUri}`);
+				},
+				onPrompt: async (prompt) => (await ui.input(prompt.message, prompt.placeholder)) ?? "",
+				onProgress: (message) => {
+					ui.setStatus("login", message);
+				},
+				onSelect: async (prompt: OAuthSelectPrompt) => {
+					const labels = prompt.options.map((option) => option.label);
+					const selectedLabel = await ui.select(prompt.message, labels);
+					return prompt.options.find((option) => option.label === selectedLabel)?.id;
+				},
+			};
+			await this.options.authStorage.login(provider as OAuthProviderId, callbacks);
+		} else {
+			const key = (await ui.input(`Enter API key for ${name}`))?.trim();
+			if (!key) {
+				throw new Error("API key cannot be empty.");
+			}
+			this.options.authStorage.set(provider, { type: "api_key", key });
+		}
+
+		this._modelRegistry.refresh();
+	}
+
+	/** Remove a provider's stored credential, then refresh the registry. */
+	logout(provider: string): void {
+		if (!this._modelRegistry) throw new Error("SessionHost not started.");
+		this.options.authStorage.logout(provider);
+		this._modelRegistry.refresh();
+	}
+
+	/**
 	 * Run a leading-slash extension command if one matches. Returns true when a command
 	 * handled the input (so the caller sends nothing to the model).
 	 */
@@ -951,8 +1065,23 @@ export class SessionHost {
 		const metadata = await session.getMetadata();
 		const sessionManager = new SessionManager(session, metadata);
 		const modelRegistry = ModelRegistry.create(authStorage);
+		const settingsManager = SettingsManager.create(agentDir, agentDir);
 		this._sessionManager = sessionManager;
 		this._modelRegistry = modelRegistry;
+
+		// Resume restores the session's own model over the agent default: the engine
+		// reconstructs `{provider, modelId}` from the branch, and if that model still
+		// exists with configured auth it wins. A fresh session keeps the agent model.
+		let effectiveModel = model;
+		if (!fresh) {
+			const sessionModel = this.buildSessionContext().model;
+			if (sessionModel) {
+				const restored = modelRegistry.find(sessionModel.provider, sessionModel.modelId);
+				if (restored && modelRegistry.hasConfiguredAuth(restored)) {
+					effectiveModel = restored;
+				}
+			}
+		}
 
 		// Discover extensions, load skills/prompts, freeze the prompt, assemble tools.
 		// `reload` (fresh) discovers as a new-session reload; resume/first-start as startup.
@@ -963,18 +1092,21 @@ export class SessionHost {
 				name,
 				sessionManager,
 				modelRegistry,
+				settingsManager,
 				discoverReason: fresh ? "reload" : "startup",
 			});
 
 		const { harness } = await createAgentSession({
 			env,
 			session,
-			model,
+			model: effectiveModel,
 			systemPrompt,
 			thinkingLevel,
 			tools: [...baseTools, ...extensionTools],
 			resources: toHarnessResources(skills, promptTemplates),
-			authStorage,
+			modelRegistry,
+			settingsManager,
+			sessionId: metadata.id,
 		});
 
 		this._config = config;
@@ -1040,6 +1172,7 @@ export class SessionHost {
 		name: string;
 		sessionManager: SessionManager;
 		modelRegistry: ModelRegistry;
+		settingsManager: SettingsManager;
 		discoverReason: "startup" | "reload";
 		seedFlagValues?: Map<string, boolean | string>;
 	}): Promise<{
@@ -1052,7 +1185,8 @@ export class SessionHost {
 		extensionTools: AgentTool[];
 		errors: { path: string; error: string }[];
 	}> {
-		const { config, agentDir, name, sessionManager, modelRegistry, discoverReason, seedFlagValues } = params;
+		const { config, agentDir, name, sessionManager, modelRegistry, settingsManager, discoverReason, seedFlagValues } =
+			params;
 		const integrationAccounts = this.options.integrationAccounts;
 
 		// One resource loader owns npm/git/local install + resolution and resolves extensions
@@ -1063,7 +1197,6 @@ export class SessionHost {
 		// host keeps the runner's stop-before-start lifecycle (see build()/reload()). The
 		// integration arm resolves BEFORE the extension arm inside reload(). The account store
 		// is process-scoped (survives reload).
-		const settingsManager = SettingsManager.create(agentDir, agentDir);
 		const loader = new DefaultResourceLoader({
 			cwd: agentDir,
 			agentDir,
