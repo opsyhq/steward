@@ -249,7 +249,15 @@ export class SessionHost {
 	private _modelRegistry?: ModelRegistry;
 	/** Session-only model shortlist, resolved against the private registry. Survives harness swaps. */
 	private _scopedModels: ScopedModel[] = [];
-	/** Daemon-registered sink that broadcasts a `scoped_models_update` after every scope change. */
+	/**
+	 * Daemon-registered sink that broadcasts a `scoped_models_update` after every scope change.
+	 *
+	 * TODO: this bespoke host→daemon callback exists only because the broadcaster subscribes to the
+	 * harness, which doesn't own scoped models. Either (a) add a general host-level event emitter so
+	 * host-originated events flow like harness own-events without a per-feature handler, or (b)
+	 * redesign scoped models as a stateless daemon resolver with client-held state (drops this handler
+	 * and the `scoped_models_update` event, trading away multi-client scope sync).
+	 */
 	private _scopedModelsHandler?: (scopedModels: ScopedModel[]) => void;
 	/** Teardown fns for the current harness's event wiring (subscribe + on + onMessageEnd). */
 	private _unsubscribe: (() => void)[] = [];
