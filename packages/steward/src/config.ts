@@ -88,9 +88,10 @@ export const ENV_SANDBOX = `${APP_NAME.toUpperCase()}_SANDBOX`;
 // DEFAULT_CONTAINER_IMAGE when unset.
 export const ENV_CONTAINER_IMAGE = `${APP_NAME.toUpperCase()}_CONTAINER_IMAGE`;
 
-// Default image for the docker sandbox backend (STEWARD_SANDBOX=docker). Slim so the first
-// pull is cheap; override with STEWARD_CONTAINER_IMAGE for a richer toolchain.
-export const DEFAULT_CONTAINER_IMAGE = "debian:stable-slim";
+// Default image for the docker sandbox backend (STEWARD_SANDBOX=docker): a published multi-arch image
+// = debian:stable-slim + ripgrep/fd (grep/find run them inside the container). Built and pushed from
+// docker/sandbox.Dockerfile. Override with STEWARD_CONTAINER_IMAGE (used as-is, expected to carry rg+fd).
+export const DEFAULT_CONTAINER_IMAGE = "ghcr.io/opsyhq/steward-sandbox:1";
 
 export function expandTildePath(path: string): string {
 	if (path === "~") return homedir();
