@@ -11,7 +11,7 @@ import {
 	trackDetachedChildPid,
 	untrackDetachedChildPid,
 } from "../../utils/shell.ts";
-import type { Environment } from "../environments/types.ts";
+import type { AgentEnvironments, Environment } from "../environments/types.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -20,6 +20,11 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Bash command to execute" }),
 	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+	target: Type.Optional(
+		Type.Union([Type.Literal("sandbox"), Type.Literal("host")], {
+			description: "Where to run: 'sandbox' (default, confined) or 'host' (the real machine; requires approval)",
+		}),
+	),
 });
 
 export type BashToolInput = Static<typeof bashSchema>;
@@ -113,6 +118,8 @@ export interface BashToolOptions {
 	commandPrefix?: string;
 	/** Hook to adjust command, cwd, or env before execution */
 	spawnHook?: BashSpawnHook;
+	/** Run targets bash routes between. Defaults to a single "sandbox" built from `env`. */
+	environments?: AgentEnvironments;
 }
 
 const BASH_UPDATE_THROTTLE_MS = 100;
@@ -123,6 +130,11 @@ export function createBashToolDefinition(
 ): ToolDefinition<typeof bashSchema, BashToolDetails | undefined> {
 	const commandPrefix = options?.commandPrefix;
 	const spawnHook = options?.spawnHook;
+	// Without a target map, the only target is the closure env, so `target:"host"` errors.
+	const environments: AgentEnvironments = options?.environments ?? {
+		default: "sandbox",
+		targets: { sandbox: env },
+	};
 	return {
 		name: "bash",
 		label: "bash",
@@ -131,13 +143,20 @@ export function createBashToolDefinition(
 		parameters: bashSchema,
 		async execute(
 			_toolCallId,
-			{ command, timeout }: { command: string; timeout?: number },
+			{ command, timeout, target }: { command: string; timeout?: number; target?: "sandbox" | "host" },
 			signal?: AbortSignal,
 			onUpdate?,
-			_ctx?,
 		) {
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
-			const spawnContext = resolveSpawnContext(resolvedCommand, env.cwd, spawnHook);
+			// Routing is all bash does; a gated target enforces its own approval inside exec.
+			const targetName = target ?? environments.default;
+			const runEnv = environments.targets[targetName];
+			if (!runEnv) {
+				throw new Error(
+					`Unknown target "${targetName}". Available: ${Object.keys(environments.targets).join(", ")}`,
+				);
+			}
+			const spawnContext = resolveSpawnContext(resolvedCommand, runEnv.cwd, spawnHook);
 			const output = new OutputAccumulator({ tempFilePrefix: "pi-bash" });
 			let updateTimer: NodeJS.Timeout | undefined;
 			let updateDirty = false;
@@ -222,7 +241,7 @@ export function createBashToolDefinition(
 			try {
 				let exitCode: number | null;
 				try {
-					const result = await env.exec(spawnContext.command, spawnContext.cwd, {
+					const result = await runEnv.exec(spawnContext.command, spawnContext.cwd, {
 						onData: handleData,
 						signal,
 						timeout,

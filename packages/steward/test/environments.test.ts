@@ -17,9 +17,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_SANDBOX } from "../src/config.ts";
-import { createEnvironment } from "../src/core/environments/index.ts";
+import type { ApprovalGate } from "../src/core/approval/types.ts";
+import { createEnvironments, createGatedEnvironment } from "../src/core/environments/index.ts";
 import { createLocalOSEnvironment } from "../src/core/environments/local-os.ts";
 import { createSandbox, isSandboxSupported } from "../src/core/environments/sandbox.ts";
+import type { Environment } from "../src/core/environments/types.ts";
+
+// The env layer only enforces a gate it is handed; tests pass a fail-closed stub.
+const denyGate: ApprovalGate = async () => ({ allowed: false, reason: "no approval response" });
+const mkEnvs = (agentDir = "/tmp/some-agent", gate: ApprovalGate = denyGate) => createEnvironments(agentDir, { gate });
 
 vi.mock("../src/core/environments/sandbox.ts", () => ({
 	isSandboxSupported: vi.fn(() => true),
@@ -38,40 +44,108 @@ afterEach(() => {
 	vi.clearAllMocks();
 });
 
-describe("createEnvironment backend selection", () => {
-	it("honors an explicit STEWARD_SANDBOX=host override without touching srt", async () => {
+describe("createEnvironments target selection", () => {
+	it("pairs a silent confined sandbox with a gated host where srt is supported", async () => {
+		const envs = await mkEnvs();
+		expect(envs.default).toBe("sandbox");
+		expect(envs.targets.sandbox.id).toBe("local-os");
+		expect(envs.targets.host.id).toBe("host");
+		expect(Object.keys(envs.targets)).toEqual(["sandbox", "host"]);
+	});
+
+	it("enforces the gate inside the host env's exec, not as an opt-in field", async () => {
+		// denyGate refuses, so the host exec is blocked before it can spawn.
+		const envs = await mkEnvs();
+		await expect(envs.targets.host.exec("whoami", "/tmp", { onData: () => {} })).rejects.toThrow(
+			/Escalation to host blocked/,
+		);
+		expect("approve" in envs.targets.host).toBe(false);
+	});
+
+	it("honors STEWARD_SANDBOX=local-os without consulting platform support", async () => {
+		process.env[ENV_SANDBOX] = "local-os";
+		const envs = await mkEnvs();
+		expect(envs.default).toBe("sandbox");
+		expect(envs.targets.sandbox.id).toBe("local-os");
+	});
+
+	it("auto and unset both confine where srt is supported", async () => {
+		process.env[ENV_SANDBOX] = "auto";
+		expect((await mkEnvs()).default).toBe("sandbox");
+		delete process.env[ENV_SANDBOX];
+		expect((await mkEnvs()).default).toBe("sandbox");
+	});
+
+	it("collapses to a single silent host target on STEWARD_SANDBOX=host, never touching srt", async () => {
 		process.env[ENV_SANDBOX] = "host";
-		const env = await createEnvironment("/tmp/some-agent");
-		expect(env.id).toBe("host");
+		const envs = await mkEnvs();
+		expect(envs.default).toBe("host");
+		expect(Object.keys(envs.targets)).toEqual(["host"]);
+		expect(envs.targets.host.id).toBe("host");
 		expect(createSandbox).not.toHaveBeenCalled();
 	});
 
-	it("honors an explicit STEWARD_SANDBOX=local-os override", async () => {
-		process.env[ENV_SANDBOX] = "local-os";
-		const env = await createEnvironment("/tmp/some-agent");
-		expect(env.id).toBe("local-os");
-	});
-
-	it("auto (and unset) confines where srt is supported, else host", async () => {
-		process.env[ENV_SANDBOX] = "auto";
-		expect((await createEnvironment("/tmp/some-agent")).id).toBe("local-os");
-		delete process.env[ENV_SANDBOX];
-		expect((await createEnvironment("/tmp/some-agent")).id).toBe("local-os");
+	it("collapses to a single host target where srt is unsupported", async () => {
 		vi.mocked(isSandboxSupported).mockReturnValue(false);
-		expect((await createEnvironment("/tmp/some-agent")).id).toBe("host");
+		const envs = await mkEnvs();
+		expect(envs.default).toBe("host");
+		expect(Object.keys(envs.targets)).toEqual(["host"]);
 	});
 
 	it("treats an unknown override as auto (platform default)", async () => {
 		process.env[ENV_SANDBOX] = "garbage";
 		vi.mocked(isSandboxSupported).mockReturnValue(false);
-		expect((await createEnvironment("/tmp/some-agent")).id).toBe("host");
+		expect((await mkEnvs()).default).toBe("host");
 	});
 
-	it("falls back to host when the local-os backend fails to initialize", async () => {
+	it("collapses to host when the sandbox backend fails to initialize", async () => {
 		process.env[ENV_SANDBOX] = "local-os";
 		vi.mocked(createSandbox).mockRejectedValueOnce(new Error("srt init boom"));
-		const env = await createEnvironment("/tmp/some-agent");
-		expect(env.id).toBe("host");
+		const envs = await mkEnvs();
+		expect(envs.default).toBe("host");
+		expect(Object.keys(envs.targets)).toEqual(["host"]);
+		expect(createSandbox).toHaveBeenCalled();
+	});
+});
+
+describe("createGatedEnvironment", () => {
+	const baseEnv = (onExec: (command: string) => void): Environment =>
+		({
+			id: "host",
+			cwd: "/work",
+			exec: async (command: string) => {
+				onExec(command);
+				return { exitCode: 0 };
+			},
+		}) as unknown as Environment;
+
+	it("runs the command, keyed by the base env id, when the gate allows it", async () => {
+		const ran: string[] = [];
+		let seen: { target: string; command: string } | undefined;
+		const gated = createGatedEnvironment(
+			baseEnv((c) => ran.push(c)),
+			async (req) => {
+				seen = { target: req.target, command: req.command };
+				return { allowed: true, scope: "once" };
+			},
+		);
+
+		await gated.exec("ls -la", "/work", { onData: () => {} });
+		expect(ran).toEqual(["ls -la"]);
+		expect(seen).toEqual({ target: "host", command: "ls -la" });
+	});
+
+	it("throws and never touches the base env when the gate refuses", async () => {
+		const ran: string[] = [];
+		const gated = createGatedEnvironment(
+			baseEnv((c) => ran.push(c)),
+			async () => ({ allowed: false, reason: "denied by user" }),
+		);
+
+		await expect(gated.exec("rm -rf /", "/work", { onData: () => {} })).rejects.toThrow(
+			/Escalation to host blocked: denied by user/,
+		);
+		expect(ran).toEqual([]);
 	});
 });
 

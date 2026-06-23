@@ -169,6 +169,11 @@ export function getAgentIntegrationsDir(name: string): string {
 	return join(getAgentDir(name), "integrations");
 }
 
+/** Path to an agent's approvals.json (durable host-escalation prefix rules). */
+export function getAgentApprovalsPath(name: string): string {
+	return join(getAgentDir(name), "approvals.json");
+}
+
 /** Path to an agent's curated SOUL.md (who it is / what it's for). */
 export function getSoulPath(name: string): string {
 	return join(getAgentDir(name), "SOUL.md");

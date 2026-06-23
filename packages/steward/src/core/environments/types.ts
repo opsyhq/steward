@@ -46,3 +46,10 @@ export interface Environment {
 	/** Detect image MIME type, returning null/undefined for non-images. */
 	detectImageMimeType?(absolutePath: string): Promise<string | null | undefined>;
 }
+
+/** Run targets a tool can route between. A gated target enforces approval inside its own methods. */
+export interface AgentEnvironments {
+	/** Key into `targets` used when a tool names no target. */
+	default: string;
+	targets: Record<string, Environment>;
+}

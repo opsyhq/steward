@@ -57,10 +57,12 @@ import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { openBrowser } from "../utils/open-browser.ts";
 import { type AgentConfig, isDeployed, loadAgentConfig, saveAgentConfig } from "./agent-config.ts";
 import { createAgentPluginManager } from "./agent-plugin-manager.ts";
+import { createApprovalGate } from "./approval/approval-gate.ts";
+import { ApprovalStore } from "./approval/approval-storage.ts";
 import type { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ResourceDiagnostic, ResourceSummary } from "./diagnostics.ts";
-import { createEnvironment, resetSandbox } from "./environments/index.ts";
+import { createEnvironments, resetSandbox } from "./environments/index.ts";
 import { type ExtensionErrorListener, ExtensionRunner, emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type {
 	ContextUsage,
@@ -1253,12 +1255,15 @@ export class SessionHost {
 				.map((error) => ({ path: getAgentIntegrationsPath(name), error: error.message })),
 		];
 
-		// Backs the file/shell tools, bound to every extension via ctx.environment.
-		// createEnvironment picks host vs srt-confined per STEWARD_SANDBOX; srt init is
-		// memoized, so this reload re-call is cheap.
-		const environment = await createEnvironment(agentDir);
+		// This host owns the approval policy (store + gate); the gate reads `getUI` lazily, so
+		// `runner` below is in scope by the time it runs mid-tool-call. The default target's env
+		// backs the file tools + ctx.environment; `environments` carries the full map to bash.
+		const approvals = ApprovalStore.create(name);
+		const gate = createApprovalGate(() => runner.getUIContext(), approvals);
+		const environments = await createEnvironments(agentDir, { gate });
+		const defaultEnv = environments.targets[environments.default];
 		const { extensions, errors, runtime } = loader.getExtensions();
-		const runner = new ExtensionRunner(extensions, runtime, agentDir, sessionManager, modelRegistry, environment);
+		const runner = new ExtensionRunner(extensions, runtime, agentDir, sessionManager, modelRegistry, defaultEnv);
 		this._extensionRunner = runner;
 		this._extensionCount = extensions.length;
 		this._loadErrors = errors;
@@ -1299,21 +1304,22 @@ export class SessionHost {
 
 		// Tools operate in the agent's home dir, where SOUL/MEMORY/USER.md and the
 		// workspace/ subdir live. memory is steward's curated-notes tool; the rest
-		// are read/write/edit/ls/grep/find plus bash, all routed through the host
-		// environment (registerTool tools reach the same instance via ctx.environment).
+		// are read/write/edit/ls/grep/find plus bash, all routed through the default
+		// target's environment (registerTool tools reach the same instance via ctx.environment).
 		const baseTools: AgentTool[] = [
 			createMemoryTool(name),
 			// The deploy tool only exists while forming — the agent uses it to author
 			// its purpose + SOUL.md and ask to be deployed. Once deployed it has served
 			// its purpose and is omitted.
 			...(isDeployed(config) ? [] : [createDeployTool(name)]),
-			createReadTool(environment),
-			createWriteTool(environment),
-			createEditTool(environment),
-			createLsTool(environment),
-			createGrepTool(environment),
-			createFindTool(environment),
-			createBashTool(environment),
+			createReadTool(defaultEnv),
+			createWriteTool(defaultEnv),
+			createEditTool(defaultEnv),
+			createLsTool(defaultEnv),
+			createGrepTool(defaultEnv),
+			createFindTool(defaultEnv),
+			// Only bash gets the target map; the rest stay on the default target.
+			createBashTool(defaultEnv, { environments }),
 		];
 		// Wrap each extension-registered tool into an engine AgentTool. The context
 		// factory is lazy (`runner.createContext()`) so it resolves the live binding
