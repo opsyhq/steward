@@ -320,7 +320,7 @@ export interface ExtensionContext {
 	hasUI: boolean;
 	/** Current working directory */
 	cwd: string;
-	/** The environment that backs the file/shell tools (host today; sandbox later). */
+	/** The environment that backs the file/shell tools (the silent sandbox default). */
 	environment: Environment;
 	/** Session manager (read-only) */
 	sessionManager: ReadonlySessionManager;
