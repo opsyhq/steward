@@ -18,3 +18,10 @@
 - Never remove or downgrade code to fix type errors from outdated deps; upgrade the dep instead.
 - Always ask before removing functionality or code that appears intentional.
 - Do not preserve backward compatibility unless the user asks for it.
+
+## Clauses
+
+1. Ask, don't assume. if something is unclear, ask before writing a single line. Never make silent assumptuions about intent, architecture, or requirements.
+2. Simplest solution first. Always implement the simplest thing that could work. Do not add abstractions or flexibility that weren't explicitly requested.
+3. Don't touch unrelated code. if a file or function is not directly part of the current task, do not modify it, even if you think it could be improved.
+4. Flag uncertanty explicitely. If you are not confident about an approach or technical detail say so before proceeding. Confidence without certanty causes more damage than admintting a gap.
