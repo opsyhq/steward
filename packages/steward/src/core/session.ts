@@ -13,6 +13,8 @@ import { getSessionsDir, getWorkspaceDir } from "../config.ts";
 export interface OpenAgentSessionOptions {
 	/** Start a fresh session instead of resuming the latest. */
 	fresh?: boolean;
+	/** Resume a specific stored session by id instead of the latest. Ignored when `fresh` is set. */
+	id?: string;
 }
 
 export interface OpenAgentSessionResult {
@@ -20,6 +22,12 @@ export interface OpenAgentSessionResult {
 	session: Session<JsonlSessionMetadata>;
 	env: NodeExecutionEnv;
 	cwd: string;
+}
+
+/** One stored session for an agent — the `id` is what `openAgentSession({ id })` / `listSessions` use. */
+export interface SessionInfo {
+	id: string;
+	createdAt: string;
 }
 
 export async function openAgentSession(
@@ -33,6 +41,14 @@ export async function openAgentSession(
 	const env = new NodeExecutionEnv({ cwd });
 	const repo = new JsonlSessionRepo({ fs: env, sessionsRoot: getSessionsDir(name) });
 
+	// Resume a specific stored session by id, matched off the repo's listing.
+	if (options.id) {
+		const existing = await repo.list({ cwd });
+		const match = existing.find((metadata) => metadata.id === options.id);
+		if (!match) throw new Error(`No session "${options.id}" for agent "${name}"`);
+		return { repo, session: await repo.open(match), env, cwd };
+	}
+
 	if (!options.fresh) {
 		const existing = await repo.list({ cwd });
 		if (existing.length > 0) {
@@ -43,4 +59,13 @@ export async function openAgentSession(
 
 	const session = await repo.create({ cwd });
 	return { repo, session, env, cwd };
+}
+
+/** Stored sessions for an agent, as `repo.list` returns them (newest first). */
+export async function listAgentSessions(name: string): Promise<SessionInfo[]> {
+	const cwd = getWorkspaceDir(name);
+	const env = new NodeExecutionEnv({ cwd });
+	const repo = new JsonlSessionRepo({ fs: env, sessionsRoot: getSessionsDir(name) });
+	const metadatas = await repo.list({ cwd });
+	return metadatas.map((metadata) => ({ id: metadata.id, createdAt: metadata.createdAt }));
 }
