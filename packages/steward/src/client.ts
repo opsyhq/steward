@@ -1,21 +1,9 @@
 /**
- * The `@opsyhq/steward` client surface — daemon clients on one entry point:
- *
- *   - `Steward`      — the agent collection (`list`, `get`, `create`).
- *   - `Agent`        — one agent: its registry data (`config`) + lifecycle (`delete`), a private
- *                      `Connection` (the transport), and the per-conversation factory
- *                      (`getConversation`/`createConversation` → `AgentSession`).
- *   - `Connection`   — the single `fetch`/SSE transport seam to a per-agent daemon (private to `Agent`).
- *   - `AgentSession` — the per-conversation proxy the interactive TUI and `--print` drive.
- *
- * `Steward`/`Agent` are thin handles over the stateless `core/agent-config.ts` registry functions
- * plus the on-demand daemon spawn: `Agent.open` finds a live daemon via the temp config + `/health`,
- * or spawns a detached `daemon <name>` (the same launch command the OS service unit runs) and waits
- * for it to come up, then binds a `Connection` and hands back the live conversation.
- *
- * Mirrors the server split: `Agent` ↔ `AgentRuntime` (durable per-agent), `AgentSession` ↔
- * `Conversation` (per-conversation). At N=1 the daemon holds one live conversation and the wire is
- * keyless; the keyed/concurrent form lights up with the multi-session wire.
+ * The `@opsyhq/steward` client surface:
+ *   - `Steward`      — the agent collection (`list`/`get`/`create`).
+ *   - `Agent`        — one agent: registry data + lifecycle, owns a private `Connection`.
+ *   - `Connection`   — the `fetch`/SSE transport to a per-agent daemon (private to `Agent`).
+ *   - `AgentSession` — the per-conversation proxy the TUI and `--print` drive.
  */
 
 import { spawn } from "node:child_process";
@@ -63,7 +51,6 @@ import type {
 	ScopedModelsUpdateEvent,
 } from "./types.ts";
 
-/** How long `Agent.open()` waits for a freshly spawned daemon to answer `/health`. */
 const HEALTH_TIMEOUT_MS = 15_000;
 const HEALTH_POLL_MS = 150;
 
@@ -85,7 +72,6 @@ function deferred<T>(): Deferred<T> {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Events the connection fans out to its subscribers (the extension-UI request is routed elsewhere). */
 type ConnectionEvent = AgentHarnessEvent | ScopedModelsUpdateEvent;
 
 /** Top level: the agent collection on disk. Holds no required state. */
@@ -107,11 +93,7 @@ export class Steward {
 	}
 }
 
-/**
- * One agent: its registry data plus per-agent lifecycle and the per-conversation factory. Owns the
- * private `Connection` (the transport) and the live `AgentSession`; mirrors the server's
- * `AgentRuntime`, which owns the live `Conversation`.
- */
+/** One agent: registry data, per-agent lifecycle, and the conversation factory over a private `Connection`. */
 export class Agent {
 	readonly config: AgentConfig;
 	private connection?: Connection;
@@ -126,10 +108,8 @@ export class Agent {
 	}
 
 	/**
-	 * Resolve the agent's daemon (config → /health) and attach, spawning a detached daemon if none is
-	 * live. The spawn reuses `daemonLaunchCommand` — the same command the OS service unit runs — so it
-	 * works on any backend: a transient, on-demand daemon, independent of the supervised unit that
-	 * only exists post-deploy. Binds the `Connection` and returns the live conversation.
+	 * Find the agent's live daemon (config → /health) and attach, else spawn a detached `daemon <name>`
+	 * (the same command the OS service unit runs) and wait for it. Returns the live conversation.
 	 */
 	async open(): Promise<AgentSession> {
 		const existing = loadDaemonConfig(this.name);
@@ -137,8 +117,7 @@ export class Agent {
 			return this.attach(`http://127.0.0.1:${existing.port}`, existing.token);
 		}
 
-		// Not live → spawn `steward daemon <name>` detached. `steward` is not on PATH in dev, so the
-		// launch command goes through the running binary (process.execPath + the resolved cli off argv[1]).
+		// The launch command goes through the running binary, since `steward` isn't on PATH in dev.
 		const [command, ...commandArgs] = daemonLaunchCommand(this.name);
 		const child = spawn(command, commandArgs, { detached: true, stdio: "ignore" });
 		child.unref();
@@ -147,18 +126,18 @@ export class Agent {
 		return this.attach(`http://127.0.0.1:${config.port}`, config.token);
 	}
 
-	/** Attach to a known, already-running daemon endpoint: bind the `Connection`, return the conversation. */
+	/** Attach to a known daemon endpoint and return its live conversation. */
 	async attach(base: string, token: string): Promise<AgentSession> {
 		this.connection = await Connection.attach(base, token);
 		return this.createConversation();
 	}
 
-	/** The live conversation, or undefined before one has been created. Find-only — never creates. */
+	/** The live conversation, or undefined if none created yet. Find-only — never creates. */
 	getConversation(): AgentSession | undefined {
 		return this.conversation;
 	}
 
-	/** Bind a per-conversation proxy onto the live connection and make it the live conversation. */
+	/** Build a conversation proxy on the live connection and make it the live one. */
 	async createConversation(): Promise<AgentSession> {
 		if (!this.connection) throw new Error("Agent connection not open. Call open()/attach() first.");
 		this.conversation = await AgentSession.create(this.connection);
@@ -190,21 +169,15 @@ export class Agent {
 }
 
 /**
- * The single `fetch`/SSE transport seam between a client and a per-agent daemon — private to `Agent`
- * (never exported from the barrel). It owns the one place `fetch` lives (`send`), the `GET /events`
- * stream and its frame parsing, the cached hello snapshot, and the raw event fan-out. Per-conversation
- * caches/verbs live on `AgentSession`, which subscribes here.
- *
- *   - `send()`  — every `POST /control` command goes through here.
- *   - `connect()` — opens `GET /events` (SSE), captures the hello snapshot, forwards harness events to
- *      subscribers and routes `extension_ui_request` to `onUiRequest`.
+ * The `fetch`/SSE transport to a per-agent daemon: the single `fetch` site (`send`), the `GET /events`
+ * stream and its frame parsing, the cached hello snapshot, and the raw fan-out to subscribers. Private
+ * to `Agent`; `AgentSession` rides it.
  */
 export class Connection {
 	private snapshot!: DaemonSessionState;
 	private readonly subscribers = new Set<(e: ConnectionEvent) => void>();
 	private abortController?: AbortController;
 
-	/** The extension-UI request stream's client half. Wired by the consumer via `AgentSession`. */
 	onUiRequest?: (req: ExtensionUIRequest) => void;
 
 	// Not readonly: `reconnect()` re-points the transport at a different daemon (the deploy handoff).
@@ -216,25 +189,21 @@ export class Connection {
 		this.token = token;
 	}
 
-	/** Attach to a known, already-running daemon: open SSE and resolve once the hello snapshot lands. */
 	static async attach(base: string, token: string): Promise<Connection> {
 		const connection = new Connection(base, token);
 		await connection.connect();
 		return connection;
 	}
 
-	/** The latest hello snapshot — the seed an `AgentSession` starts from. */
 	getSnapshot(): DaemonSessionState {
 		return this.snapshot;
 	}
 
-	/** Subscribe to the raw event stream (every frame except the extension-UI requests). */
 	subscribe(cb: (e: ConnectionEvent) => void): () => void {
 		this.subscribers.add(cb);
 		return () => this.subscribers.delete(cb);
 	}
 
-	/** The single transport seam: every control command round-trips here. */
 	async send<T>(cmd: DaemonCommand): Promise<T> {
 		const response = await fetch(`${this.base}/control`, {
 			method: "POST",
@@ -246,7 +215,7 @@ export class Connection {
 		return body.data as T;
 	}
 
-	/** Open the SSE stream and resolve once the hello snapshot lands. Consumes frames in the background. */
+	/** Open the SSE stream and resolve once the hello snapshot lands; consume frames in the background. */
 	private async connect(): Promise<void> {
 		this.abortController = new AbortController();
 		const response = await fetch(`${this.base}/events`, {
@@ -262,9 +231,8 @@ export class Connection {
 	}
 
 	/**
-	 * Move the transport onto a different daemon (the deploy handoff): drop the current SSE, re-point
-	 * at the new endpoint, reopen. The subscriber set survives, so an `AgentSession` keeps receiving
-	 * events; the fresh `connect()` delivers the new daemon's hello snapshot (read via `getSnapshot`).
+	 * Re-point the transport at a different daemon (deploy handoff). The subscriber set survives; the
+	 * fresh `connect()` delivers the new hello snapshot (read back via `getSnapshot`).
 	 */
 	async reconnect(port: number, token: string): Promise<void> {
 		this.close();
@@ -273,7 +241,6 @@ export class Connection {
 		await this.connect();
 	}
 
-	/** Abort the SSE stream so the process can exit (used by the one-shot `--print` client). */
 	close(): void {
 		this.abortController?.abort();
 	}
@@ -295,7 +262,7 @@ export class Connection {
 				}
 			}
 		} catch {
-			// The stream ended or was aborted; the consumer stops and the TUI exits on its own.
+			// The stream ended or was aborted.
 		}
 	}
 
@@ -318,7 +285,7 @@ export class Connection {
 
 		const evt = JSON.parse(data) as ConnectionEvent | ExtensionUIRequest;
 		if (evt.type === "extension_ui_request") {
-			// Not an AgentHarnessEvent — hand to the UI bridge and do NOT fan out to subscribers.
+			// Routed to the UI bridge, not the event subscribers.
 			this.onUiRequest?.(evt);
 			return;
 		}
@@ -336,15 +303,10 @@ export class Connection {
 }
 
 /**
- * The per-conversation proxy a client drives — concrete, exposing exactly the methods the TUI calls;
- * it is NOT a reusable contract and changes when the TUI changes. Construction is
- * `Agent.getConversation()`/`Agent.createConversation()`; this is the live conversation it hands back.
- *
- * It rides a shared `Connection`: every verb round-trips through `connection.send`, the event stream
- * arrives via `connection.subscribe` (kept fresh in the local snapshot/queue caches), and the
- * connection-level seams (`close`/`respondUi`/`onUiRequest`/deploy reconnect) delegate to it. Reads
- * that change rarely (`config`/`cwd`, the loaded-resource summary, the command set) are served from
- * the cached hello/get_state snapshot; per-turn reads (entries, messages) round-trip.
+ * The per-conversation proxy the TUI/`--print` drive: verbs round-trip through `connection.send`, and
+ * the event stream arrives via `connection.subscribe` into the local snapshot/queue caches. Reads that
+ * change rarely (`config`/`cwd`, resource summary, commands) are served from the cached snapshot;
+ * per-turn reads (entries, messages) round-trip.
  */
 export class AgentSession {
 	private readonly connection: Connection;
@@ -358,19 +320,17 @@ export class AgentSession {
 
 	private constructor(connection: Connection) {
 		this.connection = connection;
-		// Seed from the connection's hello snapshot, then keep it fresh off the event stream.
+		// Seed from the hello snapshot; events keep it fresh.
 		this.snap = connection.getSnapshot();
 		this.connectionUnsubscribe = connection.subscribe((evt) => this.routeEvent(evt));
 	}
 
-	/** Bind a proxy onto a live connection and warm the resource caches. */
 	static async create(connection: Connection): Promise<AgentSession> {
 		const session = new AgentSession(connection);
 		await session.refreshResources();
 		return session;
 	}
 
-	/** The extension-UI request stream's client half — delegated to the connection. */
 	get onUiRequest(): ((req: ExtensionUIRequest) => void) | undefined {
 		return this.connection.onUiRequest;
 	}
@@ -378,7 +338,7 @@ export class AgentSession {
 		this.connection.onUiRequest = handler;
 	}
 
-	/** Update the snapshot/queue caches off the stream, then fan harness events out to subscribers. */
+	/** Update the caches off the stream, then fan harness events out to subscribers. */
 	private routeEvent(evt: ConnectionEvent): void {
 		switch (evt.type) {
 			case "model_update":
@@ -388,7 +348,7 @@ export class AgentSession {
 				this.snap.thinkingLevel = evt.level;
 				break;
 			case "scoped_models_update":
-				// Host-originated, not an AgentHarnessEvent — refresh the cached scope and do NOT forward.
+				// Cache-only; not forwarded to subscribers.
 				this.snap.scopedModels = evt.scopedModels;
 				return;
 			case "queue_update":
@@ -398,7 +358,6 @@ export class AgentSession {
 		for (const handler of this.handlers) handler(evt);
 	}
 
-	/** Re-read the resource-derived caches (commands + loaded-resource summary). */
 	private async refreshResources(): Promise<void> {
 		const [resourceSummary, commands] = await Promise.all([
 			this.connection.send<ResourceSummary>({ type: "get_resource_summary" }),
@@ -408,13 +367,11 @@ export class AgentSession {
 		this.commands = commands.commands;
 	}
 
-	/** Drop the connection (aborts the SSE so the process can exit) and the subscription. */
 	close(): void {
 		this.connectionUnsubscribe();
 		this.connection.close();
 	}
 
-	// ---- What InteractiveMode calls (was AgentRuntime.* / harness.*) ----
 	subscribe(cb: (e: AgentHarnessEvent) => void): () => void {
 		this.handlers.add(cb);
 		return () => this.handlers.delete(cb);
@@ -446,7 +403,7 @@ export class AgentSession {
 
 	async reload(): Promise<void> {
 		await this.connection.send({ type: "reload" });
-		// Refresh the snapshot too (not just resources): a reload can change config-derived state.
+		// A reload can change config-derived state, so refresh the snapshot too.
 		this.snap = await this.connection.send<DaemonSessionState>({ type: "get_state" });
 		await this.refreshResources();
 	}
@@ -457,16 +414,12 @@ export class AgentSession {
 	}
 
 	/**
-	 * Persist the deploy (the human's Yes). The daemon flips the latch, registers the OS service, and
-	 * swaps to a fresh deployed session. With a real backend it also starts the supervised daemon (on
-	 * its own OS-assigned port); we then reconnect onto it and stop the birth daemon. The two are told
-	 * apart by pid: both bind ephemeral ports, so the supervised daemon is simply the one whose config
-	 * pid differs from the birth daemon's. With the `none` backend there is no supervisor — the same
-	 * daemon stays, so we just refresh the snapshot.
+	 * Persist the deploy. The daemon flips the latch and registers the OS service; with a real backend
+	 * it also starts a supervised daemon on a new port, so we reconnect onto it (told apart from the
+	 * birth daemon by pid) and stop the birth daemon. The `none` backend keeps the same daemon.
 	 */
 	async deploy(): Promise<void> {
-		// Capture the birth daemon before its deploy handler starts the supervised one (which overwrites
-		// the shared config), so we can both tell the two apart and stop the birth daemon afterward.
+		// Capture the birth daemon before its config is overwritten by the supervised one.
 		const birth = loadDaemonConfig(this.config.name);
 
 		this.snap = await this.connection.send<DaemonSessionState>({ type: "deploy" });
@@ -476,17 +429,13 @@ export class AgentSession {
 			return;
 		}
 
-		// Wait for the supervised daemon — a different pid than the birth daemon, answering /health —
-		// then move our transport onto it. (waitForHealth's /health check skips the transient
-		// pre-bind config frame whose port is still 0.)
+		// Wait for the supervised daemon (a different pid), then move our transport onto it.
 		const supervised = await waitForHealth(this.config.name, (cfg) => cfg.pid !== birth?.pid);
 		await this.connection.reconnect(supervised.port, supervised.token);
-		// The reconnect delivered the supervised daemon's hello snapshot; re-seed from it.
 		this.snap = this.connection.getSnapshot();
 		await this.refreshResources();
 
-		// The birth daemon has handed off; stop it. Its shutdown won't touch the now-supervised config
-		// (no daemon deletes the config on shutdown — it's a discovery hint the successor already owns).
+		// Stop the birth daemon; its shutdown won't touch the now-supervised config.
 		if (birth) {
 			try {
 				process.kill(birth.pid, "SIGTERM");
@@ -508,9 +457,7 @@ export class AgentSession {
 		return this.connection.send({ type: "append_message", message });
 	}
 
-	// ---- Plugin verbs — single-writer mutations routed to the daemon ----
-	// The daemon runs the install/onboard primitive against its own live resources/accounts and
-	// reloads itself, so a running daemon never goes stale (the reason these aren't a local CLI write).
+	// ---- Plugin verbs: single-writer mutations the daemon applies, then self-reloads ----
 	installPlugin(source: string): Promise<void> {
 		return this.connection.send({ type: "install_plugin", source });
 	}
@@ -531,14 +478,12 @@ export class AgentSession {
 		return results;
 	}
 
-	/** Per-turn read — the session tree changes every turn, so it round-trips. */
+	/** Per-turn read — round-trips. */
 	async getEntries(): Promise<SessionTreeEntry[]> {
 		const { entries } = await this.connection.send<{ entries: SessionTreeEntry[] }>({ type: "get_entries" });
 		return entries;
 	}
 
-	// ---- Granular capability reads — the agent detail page round-trips these once on open ----
-	/** Tools the agent has (info view) plus the names of the currently-active ones. */
 	async listTools(): Promise<{ tools: ToolInfo[]; activeToolNames: string[] }> {
 		return this.connection.send<{ tools: ToolInfo[]; activeToolNames: string[] }>({ type: "get_tool_info" });
 	}
@@ -560,48 +505,39 @@ export class AgentSession {
 		return (await this.connection.send<{ contexts: ContextInfo[] }>({ type: "get_context_info" })).contexts;
 	}
 
-	/** Auth-filtered models the daemon's registry exposes — the single-pick selector's candidates. */
 	async getAvailableModels(): Promise<Model<Api>[]> {
 		return (await this.connection.send<{ models: Model<Api>[] }>({ type: "get_available_models" })).models;
 	}
 
-	/** Switch the live model; the daemon resolves the pair, persists the default, and emits model_update. */
+	/** Switch the live model; the daemon persists the default and emits model_update. */
 	setModel(provider: string, modelId: string): Promise<Model<Api>> {
 		return this.connection.send({ type: "set_model", provider, modelId });
 	}
 
-	/** Login-eligible providers the daemon exposes, optionally filtered to a single auth type. */
 	async getLoginProviderOptions(authType?: "oauth" | "api_key"): Promise<AuthSelectorProvider[]> {
 		return (
 			await this.connection.send<{ providers: AuthSelectorProvider[] }>({ type: "get_login_providers", authType })
 		).providers;
 	}
 
-	/** Providers with a stored credential — the logout candidates. */
 	async getLogoutProviderOptions(): Promise<AuthSelectorProvider[]> {
 		return (await this.connection.send<{ providers: AuthSelectorProvider[] }>({ type: "get_logout_providers" }))
 			.providers;
 	}
 
-	/**
-	 * Run a provider login. The daemon drives the flow server-side (credentials never cross the wire);
-	 * OAuth prompts arrive as `extension_ui_request` events and round-trip via `respondUi`.
-	 */
+	/** Run a provider login daemon-side (credentials never cross the wire); OAuth prompts round-trip via respondUi. */
 	login(provider: string, authType: "oauth" | "api_key"): Promise<void> {
 		return this.connection.send({ type: "login", provider, authType });
 	}
 
-	/** Remove a provider's stored credential daemon-side. */
 	logout(provider: string): Promise<void> {
 		return this.connection.send({ type: "logout", provider });
 	}
 
-	/** The live model from the cached snapshot (kept fresh by the model_update frame). */
 	getModel(): Model<Api> | undefined {
 		return this.snap.model;
 	}
 
-	/** The session's model scope from the cached snapshot (kept fresh by the scoped_models_update frame). */
 	getScopedModels(): ScopedModel[] {
 		return this.snap.scopedModels;
 	}
@@ -616,27 +552,22 @@ export class AgentSession {
 		return this.connection.send({ type: "set_enabled_models", enabledModels });
 	}
 
-	/** The live thinking level from the cached snapshot (kept fresh by the thinking_level_update frame). */
 	getThinkingLevel(): ThinkingLevel {
 		return this.snap.thinkingLevel;
 	}
 
-	/**
-	 * The thinking levels the current model supports (the daemon clamps internally). Falls back to
-	 * the full token set when no model is resolved, mirroring the in-process selector.
-	 */
+	/** The thinking levels the current model supports, or the full set when no model is resolved. */
 	getAvailableThinkingLevels(): ThinkingLevel[] {
 		const model = this.snap.model;
 		if (!model) return THINKING_LEVELS;
 		return getSupportedThinkingLevels(model) as ThinkingLevel[];
 	}
 
-	/** Switch the live thinking level; the daemon clamps it to the model and emits thinking_level_update. */
 	setThinkingLevel(level: ThinkingLevel): Promise<void> {
 		return this.connection.send({ type: "set_thinking_level", level });
 	}
 
-	/** Per-turn read — the flattened transcript round-trips (only `.messages` is consumed client-side). */
+	/** Per-turn read — round-trips (only `.messages` is consumed client-side). */
 	async buildSessionContext(): Promise<SessionContext> {
 		const { messages } = await this.connection.send<{ messages: AgentMessage[] }>({ type: "get_messages" });
 		return { messages, thinkingLevel: this.snap.thinkingLevel, model: null, activeToolNames: null };
@@ -667,9 +598,7 @@ export class AgentSession {
 		return this.queue.followUp;
 	}
 
-	// ---- Extension surface, narrowed so no runner object leaks into the TUI ----
-	// Extension shortcuts / message renderers / user-bash interception ride the extension runner,
-	// which lives server-side, so they are inert here.
+	// ---- Extension surface, inert client-side (the runner lives server-side) ----
 	getShortcuts(): Map<KeyId, ExtensionShortcut> {
 		return new Map();
 	}
@@ -682,16 +611,11 @@ export class AgentSession {
 		return Promise.resolve(undefined);
 	}
 
-	/**
-	 * Context for an extension shortcut handler. Unreachable — `getShortcuts()` returns an empty
-	 * map, so no handler is ever invoked — and fails loud rather than fabricating a context.
-	 */
+	/** Unreachable (`getShortcuts()` is always empty); fails loud rather than fabricating a context. */
 	createShortcutContext(): ExtensionCommandContext {
 		throw new Error("Extension shortcuts are not wired over the daemon.");
 	}
 
-	// ---- The extension-UI round-trip's client half ----
-	/** Answer a parked daemon-side dialog (fire-and-forget) — delegated to the connection. */
 	respondUi(id: string, answer: Record<string, unknown>): Promise<void> {
 		return this.connection.respondUi(id, answer);
 	}
@@ -714,7 +638,7 @@ export async function isHealthy(port: number): Promise<boolean> {
 /**
  * Poll the config + `/health` until a matching daemon answers (or time out). The optional predicate
  * narrows which config counts — the deploy handoff waits for the supervised daemon (a pid different
- * from the outgoing birth daemon's), ignoring the birth daemon's soon-to-be-overwritten config.
+ * from the outgoing birth daemon's).
  */
 export async function waitForHealth(
 	name: string,
