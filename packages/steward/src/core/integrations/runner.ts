@@ -165,12 +165,11 @@ export class IntegrationRunner {
 
 	/** Per-service `ctx.store` handle, closing over the service so the integration sees only its own file. */
 	private storeHandle(service: string): IntegrationStoreHandle {
-		const store = this.store;
 		return {
-			get: (key) => store.get(service, key),
-			set: (key, value) => store.set(service, key, value),
-			getAll: () => store.getAll(service),
-			delete: (key) => store.delete(service, key),
+			get: (key) => this.store.get(service, key),
+			set: (key, value) => this.store.set(service, key, value),
+			getAll: () => this.store.getAll(service),
+			delete: (key) => this.store.delete(service, key),
 		};
 	}
 

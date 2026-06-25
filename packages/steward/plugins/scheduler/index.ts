@@ -39,21 +39,25 @@ const Schedule = Type.Union([
 type Schedule = Static<typeof Schedule>;
 
 const Target = Type.Union([Type.Literal("isolated"), Type.Literal("current")]);
+type Target = Static<typeof Target>;
 
-const Job = Type.Object({
-	id: Type.String(),
-	name: Type.Optional(Type.String()),
-	prompt: Type.String(),
-	schedule: Schedule,
-	enabled: Type.Boolean(),
+interface Job {
+	id: string;
+	name?: string;
+	prompt: string;
+	schedule: Schedule;
+	enabled: boolean;
 	/** Where the woken session lands: a fresh tagged session ("isolated") or the creating one ("current"). */
-	target: Target,
-	createdSessionId: Type.Optional(Type.String()),
+	target: Target;
+	createdSessionId?: string;
 	/** Epoch ms; advanced before firing. */
-	nextRunAt: Type.Number(),
-	lastRunAt: Type.Optional(Type.Number()),
-});
-type Job = Static<typeof Job>;
+	nextRunAt: number;
+	lastRunAt?: number;
+}
+
+interface SchedulerAccount {
+	tickMs?: number;
+}
 
 /** Jobs live under the single store key `"jobs"`, keyed by id. */
 function loadJobs(store: IntegrationStoreHandle): Record<string, Job> {
@@ -74,26 +78,6 @@ function computeNextRunAt(schedule: Schedule, fromMs: number): number | null {
 			return new Cron(schedule.expr, { timezone: schedule.tz }).nextRun(new Date(fromMs))?.getTime() ?? null;
 	}
 }
-
-const AddJobParams = Type.Object({
-	prompt: Type.String(),
-	name: Type.Optional(Type.String()),
-	schedule: Schedule,
-	target: Type.Optional(Target),
-	createdSessionId: Type.Optional(Type.String()),
-});
-
-const UpdateJobParams = Type.Object({
-	id: Type.String(),
-	prompt: Type.Optional(Type.String()),
-	name: Type.Optional(Type.String()),
-	schedule: Type.Optional(Schedule),
-	enabled: Type.Optional(Type.Boolean()),
-	target: Type.Optional(Target),
-	createdSessionId: Type.Optional(Type.String()),
-});
-
-const JobIdParams = Type.Object({ id: Type.String() });
 
 async function onboard(ctx: IntegrationOnboardContext): Promise<Record<string, unknown>> {
 	ctx.ui.notify("Scheduler enabled.", "info");
@@ -120,9 +104,21 @@ export default function (steward: IntegrationsAPI) {
 		actions: {
 			addJob: {
 				description: "Schedule a new job from a prompt and a schedule (at / every / cron).",
-				parameters: AddJobParams,
+				parameters: Type.Object({
+					prompt: Type.String(),
+					name: Type.Optional(Type.String()),
+					schedule: Schedule,
+					target: Type.Optional(Target),
+					createdSessionId: Type.Optional(Type.String()),
+				}),
 				execute: async (params, ctx) => {
-					const p = params as Static<typeof AddJobParams>;
+					const p = params as {
+						prompt: string;
+						name?: string;
+						schedule: Schedule;
+						target?: Target;
+						createdSessionId?: string;
+					};
 					const now = Date.now();
 					const seeded = computeNextRunAt(p.schedule, now);
 					const job: Job = {
@@ -150,9 +146,25 @@ export default function (steward: IntegrationsAPI) {
 			},
 			updateJob: {
 				description: "Update a job by id; recomputes the next run when the schedule changes.",
-				parameters: UpdateJobParams,
+				parameters: Type.Object({
+					id: Type.String(),
+					prompt: Type.Optional(Type.String()),
+					name: Type.Optional(Type.String()),
+					schedule: Type.Optional(Schedule),
+					enabled: Type.Optional(Type.Boolean()),
+					target: Type.Optional(Target),
+					createdSessionId: Type.Optional(Type.String()),
+				}),
 				execute: async (params, ctx) => {
-					const p = params as Static<typeof UpdateJobParams>;
+					const p = params as {
+						id: string;
+						prompt?: string;
+						name?: string;
+						schedule?: Schedule;
+						enabled?: boolean;
+						target?: Target;
+						createdSessionId?: string;
+					};
 					const jobs = loadJobs(ctx.store);
 					const job = jobs[p.id];
 					if (!job) throw new Error(`unknown job '${p.id}'`);
@@ -175,9 +187,9 @@ export default function (steward: IntegrationsAPI) {
 			},
 			removeJob: {
 				description: "Delete a job by id.",
-				parameters: JobIdParams,
+				parameters: Type.Object({ id: Type.String() }),
 				execute: async (params, ctx) => {
-					const { id } = params as Static<typeof JobIdParams>;
+					const { id } = params as { id: string };
 					const jobs = loadJobs(ctx.store);
 					const removed = id in jobs;
 					delete jobs[id];
@@ -187,9 +199,9 @@ export default function (steward: IntegrationsAPI) {
 			},
 			runJob: {
 				description: "Run a job on the next tick (sets it due immediately).",
-				parameters: JobIdParams,
+				parameters: Type.Object({ id: Type.String() }),
 				execute: async (params, ctx) => {
-					const { id } = params as Static<typeof JobIdParams>;
+					const { id } = params as { id: string };
 					const jobs = loadJobs(ctx.store);
 					const job = jobs[id];
 					if (!job) throw new Error(`unknown job '${id}'`);
@@ -201,7 +213,7 @@ export default function (steward: IntegrationsAPI) {
 			},
 		},
 		run(ctx) {
-			const account = ctx.account as { tickMs?: number };
+			const account = ctx.account as SchedulerAccount;
 			const tickMs = account.tickMs ?? DEFAULT_TICK_MS;
 
 			const tick = (): void => {

@@ -115,35 +115,29 @@ export class InMemoryIntegrationStoreBackend implements IntegrationStoreBackend 
 }
 
 /**
- * Per-agent integration state store, one JSON file per service. Backends are created
- * lazily on first touch so a service that never stores state never opens a file. Each
- * mutation re-reads + merges against the fresh on-disk copy under lock, so a concurrent
- * writer to a different key in the same file can't be clobbered.
+ * Per-agent integration state store, one JSON file per service. A service's backend is
+ * created on first touch; reads and writes go through it under lock, and a write re-reads
+ * + merges against the fresh on-disk copy so a concurrent writer to a different key in the
+ * same file can't be clobbered.
  */
 export class IntegrationStore {
-	/** service → its backend (created on first touch). */
 	private backends: Map<string, IntegrationStoreBackend> = new Map();
-	/** service → last-known parsed state. */
-	private cache: Map<string, IntegrationStoreData> = new Map();
-	/** services whose file failed to parse — left untouched so a bad file isn't clobbered. */
-	private loadErrors: Map<string, Error> = new Map();
 	private errors: Error[] = [];
-	private backendFactory: (service: string) => IntegrationStoreBackend;
+	/** Agent name for the file backend; null selects the in-memory backend. */
+	private agentName: string | null;
 
-	private constructor(backendFactory: (service: string) => IntegrationStoreBackend) {
-		this.backendFactory = backendFactory;
+	private constructor(agentName: string | null) {
+		this.agentName = agentName;
 	}
 
 	/** Per-agent store at `~/.steward/agents/<name>/store/<service>.json`. */
 	static create(agentName: string): IntegrationStore {
-		return new IntegrationStore(
-			(service) => new FileIntegrationStoreBackend(getIntegrationStorePath(agentName, service)),
-		);
+		return new IntegrationStore(agentName);
 	}
 
-	/** In-memory store, one backend per service, seeded from `seed[service]`. */
+	/** In-memory store seeded from `seed[service]`, for tests. */
 	static inMemory(seed: Record<string, IntegrationStoreData> = {}): IntegrationStore {
-		const store = new IntegrationStore(() => new InMemoryIntegrationStoreBackend());
+		const store = new IntegrationStore(null);
 		for (const [service, data] of Object.entries(seed)) {
 			for (const [key, value] of Object.entries(data)) {
 				store.set(service, key, value);
@@ -152,89 +146,63 @@ export class IntegrationStore {
 		return store;
 	}
 
-	private recordError(error: unknown): void {
-		const normalizedError = error instanceof Error ? error : new Error(String(error));
-		this.errors.push(normalizedError);
-	}
-
-	private parseStoreData(content: string | undefined): IntegrationStoreData {
-		if (!content) {
-			return {};
-		}
-		return JSON.parse(content) as IntegrationStoreData;
-	}
-
-	private ensureBackend(service: string): IntegrationStoreBackend {
+	private backendFor(service: string): IntegrationStoreBackend {
 		let backend = this.backends.get(service);
 		if (!backend) {
-			backend = this.backendFactory(service);
+			backend =
+				this.agentName === null
+					? new InMemoryIntegrationStoreBackend()
+					: new FileIntegrationStoreBackend(getIntegrationStorePath(this.agentName, service));
 			this.backends.set(service, backend);
 		}
 		return backend;
 	}
 
-	/** Parsed state for one service, loaded from its file on first access. */
-	private loadService(service: string): IntegrationStoreData {
-		const cached = this.cache.get(service);
-		if (cached) {
-			return cached;
-		}
-		let data: IntegrationStoreData = {};
-		try {
-			this.ensureBackend(service).withLock((current) => {
-				data = this.parseStoreData(current);
-				return { result: undefined };
-			});
-			this.loadErrors.delete(service);
-		} catch (error) {
-			this.loadErrors.set(service, error as Error);
-			this.recordError(error);
-		}
-		this.cache.set(service, data);
-		return data;
+	private recordError(error: unknown): void {
+		this.errors.push(error instanceof Error ? error : new Error(String(error)));
 	}
 
-	/** Apply a single-key mutation: optimistic in-memory, then merge against fresh on-disk under lock. */
-	private persistMutation(service: string, mutate: (data: IntegrationStoreData) => void): void {
-		const optimistic = { ...this.loadService(service) };
-		mutate(optimistic);
-		this.cache.set(service, optimistic);
-
-		if (this.loadErrors.has(service)) {
-			return;
-		}
+	/** A service's parsed state, read fresh under lock; `{}` on a missing or unreadable file. */
+	private read(service: string): IntegrationStoreData {
 		try {
-			this.ensureBackend(service).withLock((current) => {
-				const fresh = this.parseStoreData(current);
-				mutate(fresh);
-				this.cache.set(service, fresh);
-				return { result: undefined, next: JSON.stringify(fresh, null, 2) };
+			return this.backendFor(service).withLock((current) => ({
+				result: current ? (JSON.parse(current) as IntegrationStoreData) : {},
+			}));
+		} catch (error) {
+			this.recordError(error);
+			return {};
+		}
+	}
+
+	/** Read-modify-write a service's file under lock, merging the change against the fresh copy. */
+	private write(service: string, mutate: (data: IntegrationStoreData) => void): void {
+		try {
+			this.backendFor(service).withLock((current) => {
+				const data = current ? (JSON.parse(current) as IntegrationStoreData) : {};
+				mutate(data);
+				return { result: undefined, next: JSON.stringify(data, null, 2) };
 			});
 		} catch (error) {
 			this.recordError(error);
 		}
 	}
 
-	/** Read one key from a service's state. */
 	get(service: string, key: string): unknown {
-		return this.loadService(service)[key];
+		return this.read(service)[key];
 	}
 
-	/** Write one key into a service's state. */
+	getAll(service: string): IntegrationStoreData {
+		return { ...this.read(service) };
+	}
+
 	set(service: string, key: string, value: unknown): void {
-		this.persistMutation(service, (data) => {
+		this.write(service, (data) => {
 			data[key] = value;
 		});
 	}
 
-	/** A copy of a service's whole state. */
-	getAll(service: string): IntegrationStoreData {
-		return { ...this.loadService(service) };
-	}
-
-	/** Remove one key from a service's state. */
 	delete(service: string, key: string): void {
-		this.persistMutation(service, (data) => {
+		this.write(service, (data) => {
 			delete data[key];
 		});
 	}
