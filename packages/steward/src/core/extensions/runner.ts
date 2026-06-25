@@ -4,14 +4,15 @@
  *
  * The runner holds the durable, agent-global extension state (loaded extensions, flag values, the
  * shared runtime). It is session-agnostic: every event/tool/command invocation is threaded the
- * originating session as an `ExtensionContextSource`, from which `createContext()` builds the flat
- * `ExtensionContext` (`{ session, ui, mode }`). So the same runner serves N live sessions, each
- * carrying its own presentation channel.
+ * originating `AgentSession`, from which `createContext()` builds the flat `ExtensionContext`
+ * (`{ session, ui, mode }`) by reading that session's facade + presentation channel. So the same
+ * runner serves N live sessions, each carrying its own presentation channel.
  */
 
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@opsyhq/agent";
 import { type Theme, theme } from "../../theme/theme.ts";
+import type { AgentSession } from "../agent-runtime.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type {
@@ -25,7 +26,6 @@ import type {
 	ExtensionError,
 	ExtensionEvent,
 	ExtensionFlag,
-	ExtensionMode,
 	ExtensionRuntime,
 	ExtensionUIContext,
 	InputEvent,
@@ -39,7 +39,6 @@ import type {
 	RegisteredCommand,
 	RegisteredTool,
 	ResolvedCommand,
-	Session,
 	SessionBeforeCompactResult,
 	SessionShutdownEvent,
 	ToolCallEvent,
@@ -49,20 +48,6 @@ import type {
 	UserBashEvent,
 	UserBashEventResult,
 } from "./types.ts";
-
-/**
- * The per-session bundle the runner reads to build an `ExtensionContext`. A live `AgentSession`
- * implements it (its facade + its presentation channel), so the runner stays decoupled from the
- * concrete session class.
- */
-export interface ExtensionContextSource {
-	/** The session facade handed to extensions as `ctx.session`. */
-	readonly extensionFacade: Session;
-	/** This session's UI rail — dialogs route only to its subscribers. */
-	readonly ui: ExtensionUIContext;
-	/** The session's run mode. */
-	readonly mode: ExtensionMode;
-}
 
 /** Combined result from all before_agent_start handlers */
 interface BeforeAgentStartCombinedResult {
@@ -104,10 +89,10 @@ export type ShutdownHandler = () => void;
 export async function emitSessionShutdownEvent(
 	extensionRunner: ExtensionRunner,
 	event: SessionShutdownEvent,
-	src: ExtensionContextSource,
+	session: AgentSession,
 ): Promise<boolean> {
 	if (extensionRunner.hasHandlers("session_shutdown")) {
-		await extensionRunner.emit(event, src);
+		await extensionRunner.emit(event, session);
 		return true;
 	}
 	return false;
@@ -193,11 +178,11 @@ export class ExtensionRunner {
 	}
 
 	/**
-	 * Build the flat context handed to event handlers, custom tools, and commands from a session's
-	 * `ExtensionContextSource` — a fresh `{ session, ui, mode }` each call, scoped to that session.
+	 * Build the flat context handed to event handlers, custom tools, and commands from the originating
+	 * `AgentSession` — a fresh `{ session, ui, mode }` each call, scoped to that session.
 	 */
-	createContext(src: ExtensionContextSource): ExtensionContext {
-		return { session: src.extensionFacade, ui: src.ui, mode: src.mode };
+	createContext(session: AgentSession): ExtensionContext {
+		return { session: session.facade, ui: session.ui, mode: session.mode };
 	}
 
 	getExtensionPaths(): string[] {
@@ -343,11 +328,8 @@ export class ExtensionRunner {
 		return event.type === "session_before_compact";
 	}
 
-	async emit<TEvent extends RunnerEmitEvent>(
-		event: TEvent,
-		src: ExtensionContextSource,
-	): Promise<RunnerEmitResult<TEvent>> {
-		const ctx = this.createContext(src);
+	async emit<TEvent extends RunnerEmitEvent>(event: TEvent, session: AgentSession): Promise<RunnerEmitResult<TEvent>> {
+		const ctx = this.createContext(session);
 		let result: SessionBeforeCompactResult | undefined;
 
 		for (const ext of this.extensions) {
@@ -380,8 +362,8 @@ export class ExtensionRunner {
 		return result as RunnerEmitResult<TEvent>;
 	}
 
-	async emitMessageEnd(event: MessageEndEvent, src: ExtensionContextSource): Promise<AgentMessage | undefined> {
-		const ctx = this.createContext(src);
+	async emitMessageEnd(event: MessageEndEvent, session: AgentSession): Promise<AgentMessage | undefined> {
+		const ctx = this.createContext(session);
 		let currentMessage = event.message;
 		let modified = false;
 
@@ -422,11 +404,8 @@ export class ExtensionRunner {
 		return modified ? currentMessage : undefined;
 	}
 
-	async emitToolResult(
-		event: ToolResultEvent,
-		src: ExtensionContextSource,
-	): Promise<ToolResultEventResult | undefined> {
-		const ctx = this.createContext(src);
+	async emitToolResult(event: ToolResultEvent, session: AgentSession): Promise<ToolResultEventResult | undefined> {
+		const ctx = this.createContext(session);
 		const currentEvent: ToolResultEvent = { ...event };
 		let modified = false;
 
@@ -475,8 +454,8 @@ export class ExtensionRunner {
 		};
 	}
 
-	async emitToolCall(event: ToolCallEvent, src: ExtensionContextSource): Promise<ToolCallEventResult | undefined> {
-		const ctx = this.createContext(src);
+	async emitToolCall(event: ToolCallEvent, session: AgentSession): Promise<ToolCallEventResult | undefined> {
+		const ctx = this.createContext(session);
 		let result: ToolCallEventResult | undefined;
 
 		for (const ext of this.extensions) {
@@ -498,8 +477,8 @@ export class ExtensionRunner {
 		return result;
 	}
 
-	async emitUserBash(event: UserBashEvent, src: ExtensionContextSource): Promise<UserBashEventResult | undefined> {
-		const ctx = this.createContext(src);
+	async emitUserBash(event: UserBashEvent, session: AgentSession): Promise<UserBashEventResult | undefined> {
+		const ctx = this.createContext(session);
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("user_bash");
@@ -527,8 +506,8 @@ export class ExtensionRunner {
 		return undefined;
 	}
 
-	async emitContext(messages: AgentMessage[], src: ExtensionContextSource): Promise<AgentMessage[]> {
-		const ctx = this.createContext(src);
+	async emitContext(messages: AgentMessage[], session: AgentSession): Promise<AgentMessage[]> {
+		const ctx = this.createContext(session);
 		let currentMessages = structuredClone(messages);
 
 		for (const ext of this.extensions) {
@@ -559,8 +538,8 @@ export class ExtensionRunner {
 		return currentMessages;
 	}
 
-	async emitBeforeProviderRequest(payload: unknown, src: ExtensionContextSource): Promise<unknown> {
-		const ctx = this.createContext(src);
+	async emitBeforeProviderRequest(payload: unknown, session: AgentSession): Promise<unknown> {
+		const ctx = this.createContext(session);
 		let currentPayload = payload;
 
 		for (const ext of this.extensions) {
@@ -597,9 +576,9 @@ export class ExtensionRunner {
 		prompt: string,
 		images: ImageContent[] | undefined,
 		systemPrompt: string,
-		src: ExtensionContextSource,
+		session: AgentSession,
 	): Promise<BeforeAgentStartCombinedResult | undefined> {
-		const ctx = this.createContext(src);
+		const ctx = this.createContext(session);
 		let currentSystemPrompt = systemPrompt;
 		const systemPromptOptions = ctx.session.getSystemPromptOptions();
 		const messages: NonNullable<BeforeAgentStartEventResult["message"]>[] = [];
@@ -659,9 +638,9 @@ export class ExtensionRunner {
 		images: ImageContent[] | undefined,
 		source: InputSource,
 		streamingBehavior: "steer" | "followUp" | undefined,
-		src: ExtensionContextSource,
+		session: AgentSession,
 	): Promise<InputEventResult> {
-		const ctx = this.createContext(src);
+		const ctx = this.createContext(session);
 		let currentText = text;
 		let currentImages = images;
 

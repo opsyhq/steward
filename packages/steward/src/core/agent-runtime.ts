@@ -7,8 +7,8 @@
  * and reloads sessions, holding the resident ones in `_sessions` keyed by id. `AgentSession` owns the
  * per-session half: the live `AgentHarness`, `SessionManager`, env, frozen system prompt, the per-
  * session presentation channel (`ui`/`mode`), turn state, the dispatch pipeline, and the
- * harness↔extension event wiring. Every event/tool/command is threaded the originating session as the
- * `ExtensionContextSource`, so the shared runner serves all sessions without an ambient "current".
+ * harness↔extension event wiring. Every event/tool/command is threaded the originating `AgentSession`,
+ * so the shared runner serves all sessions without an ambient "current".
  *
  * The system prompt is frozen for a session's lifetime, so changing it (the birth instruction dropping
  * at deploy) needs a fresh session.
@@ -62,7 +62,6 @@ import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ResourceDiagnostic, ResourceSummary } from "./diagnostics.ts";
 import { type AgentEnvironments, createEnvironments, resetSandbox, stopContainer } from "./environments/index.ts";
 import {
-	type ExtensionContextSource,
 	type ExtensionErrorListener,
 	ExtensionRunner,
 	emitSessionShutdownEvent,
@@ -795,7 +794,7 @@ export class AgentRuntime {
 		const enabledModelIds = this._settingsManager.getEnabledModels();
 		if (enabledModelIds && enabledModelIds.length > 0) await agentSession.setScopedModels(enabledModelIds);
 
-		await options?.withSession?.(agentSession.extensionFacade);
+		await options?.withSession?.(agentSession.facade);
 		return agentSession;
 	}
 
@@ -973,17 +972,20 @@ export class AgentRuntime {
 		// Wire the agent-global `steward.*` delegates onto the shared extension runtime. Closures over
 		// `this` (the durable AgentRuntime) — set here where `this` is in scope. The session methods
 		// expose the public `Session` facade (held by each `AgentSession`), not the internal class.
-		runtime.getSession = (sessionId) => this.getSession(sessionId)?.extensionFacade;
-		runtime.openSession = async (sessionId) => (await this.openSession(sessionId)).extensionFacade;
-		runtime.createSession = async (opts) => (await this.createSession(opts)).extensionFacade;
+		runtime.getSession = (sessionId) => this.getSession(sessionId)?.facade;
+		runtime.openSession = async (sessionId) => (await this.openSession(sessionId)).facade;
+		runtime.createSession = async (opts) => (await this.createSession(opts)).facade;
 		runtime.listSessions = () => this.listSessions();
 		runtime.findSessions = (filter) => this.findSessions(filter);
 		runtime.reload = () => this.reload();
 		runtime.shutdown = () => this.shutdown();
 		runtime.getModelRegistry = () => this._modelRegistry;
 		runtime.getEnvironments = () => this.environments;
-		// `runtime.refreshTools` stays the loader's no-op: a mid-session registerTool takes effect on the
-		// next `reload()`, which rebuilds every resident session's tools.
+		// A post-bind `steward.registerTool()` refreshes every resident session's tools immediately (the
+		// loader fires `runtime.refreshTools()` after such a call) — no `/reload` required.
+		runtime.refreshTools = () => {
+			for (const session of this._sessions.values()) this.refreshSessionTools(session);
+		};
 
 		const runner = new ExtensionRunner(extensions, runtime, this._modelRegistry);
 		this._extensionRunner = runner;
@@ -1147,10 +1149,10 @@ export class AgentRuntime {
  * `SessionManager`, the execution env, the per-session run-target map, the per-session presentation
  * channel (`ui`/`mode`), the frozen system prompt, and the transient turn state, plus the dispatch
  * pipeline and the harness↔extension event wiring. Reads the durable/shared half (runner, registry)
- * off its `AgentRuntime`. Implements `ExtensionContextSource`, so the shared runner builds an
+ * off its `AgentRuntime`. The shared runner reads its `facade`/`ui`/`mode` to build an
  * `ExtensionContext` scoped to this session.
  */
-export class AgentSession implements ExtensionContextSource {
+export class AgentSession {
 	readonly sessionManager: SessionManager;
 	private readonly env: NodeExecutionEnv;
 	/** The per-session run-target map (sandbox/host) backing the file + bash tools. */
@@ -1160,7 +1162,7 @@ export class AgentSession implements ExtensionContextSource {
 	/** This session's run mode. */
 	readonly mode: ExtensionMode;
 	/** The session facade handed to extensions as `ctx.session` / returned from `steward.getSession`. */
-	readonly extensionFacade: SessionApi;
+	readonly facade: SessionApi;
 	/** The live harness — attached just after construction (so tools can capture this session). */
 	private _harness?: AgentHarness;
 	/** The frozen system prompt, backing `ctx.getSystemPrompt()`. Refreshed (ctx copy only) on reload. */
@@ -1188,7 +1190,7 @@ export class AgentSession implements ExtensionContextSource {
 		this.ui = init.ui;
 		this.mode = init.mode;
 		this.systemPromptOptions = { cwd: runtime.getCwd() };
-		this.extensionFacade = this.buildFacade();
+		this.facade = this.buildFacade();
 	}
 
 	/** The live harness. Throws if read before `attachHarness` (only the runtime can hit that window). */
