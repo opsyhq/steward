@@ -1,9 +1,9 @@
 /**
  * The `@opsyhq/steward` client surface:
- *   - `Steward`      — the agent collection (`list`/`get`/`create`).
- *   - `Agent`        — one agent: registry data + lifecycle, owns a private `Connection`.
- *   - `Connection`   — the `fetch`/SSE transport to a per-agent daemon (private to `Agent`).
- *   - `AgentSession` — the per-conversation proxy the TUI and `--print` drive.
+ *   - `Steward`       — the agent collection (`list`/`get`/`create`).
+ *   - `Agent`         — one agent: registry data + lifecycle + the `fetch`/SSE transport to its daemon
+ *                       (the root control stream, the `send` site, the session map).
+ *   - `SessionHandle` — the per-session proxy the TUI and `--print` drive, over `/sessions/:id/*`.
  */
 
 import { spawn } from "node:child_process";
@@ -36,9 +36,12 @@ import { daemonLaunchCommand, getServiceManager } from "./core/service/service-m
 import type { Skill } from "./core/skills.ts";
 import type {
 	AuthSelectorProvider,
+	DaemonAgentState,
 	DaemonCommand,
+	DaemonControlEvent,
 	DaemonResponse,
 	DaemonSessionState,
+	DaemonSessionSummary,
 	ExtensionUIRequest,
 	OnboardServiceResult,
 	ScopedModelsUpdateEvent,
@@ -65,7 +68,45 @@ function deferred<T>(): Deferred<T> {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-type ConnectionEvent = AgentHarnessEvent | ScopedModelsUpdateEvent;
+type SessionEvent = AgentHarnessEvent | ScopedModelsUpdateEvent;
+
+/**
+ * Consume an SSE response body: split on frame boundaries, parse each `event:`/`data:` frame (joining
+ * multi-line `data:`), and hand it to `onFrame`. A single malformed frame is skipped, not fatal.
+ */
+async function consumeSSE(
+	body: ReadableStream<Uint8Array>,
+	onFrame: (event: string, data: string) => void,
+): Promise<void> {
+	const decoder = new TextDecoder();
+	let buffer = "";
+	try {
+		for await (const chunk of body) {
+			buffer += decoder.decode(chunk, { stream: true });
+			let boundary = buffer.indexOf("\n\n");
+			while (boundary >= 0) {
+				const raw = buffer.slice(0, boundary);
+				buffer = buffer.slice(boundary + 2);
+				boundary = buffer.indexOf("\n\n");
+				let event = "message";
+				let data = "";
+				for (const line of raw.split("\n")) {
+					if (line.startsWith(":")) continue; // keepalive comment
+					if (line.startsWith("event:")) event = line.slice(6).trim();
+					else if (line.startsWith("data:")) data += (data ? "\n" : "") + line.slice(5).replace(/^ /, "");
+				}
+				if (!data) continue;
+				try {
+					onFrame(event, data);
+				} catch {
+					// A single bad frame must not kill the stream.
+				}
+			}
+		}
+	} catch {
+		// The stream ended or was aborted.
+	}
+}
 
 /** Top level: the agent collection on disk. Holds no required state. */
 export class Steward {
@@ -86,11 +127,22 @@ export class Steward {
 	}
 }
 
-/** One agent: registry data, per-agent lifecycle, and the conversation factory over a private `Connection`. */
+/**
+ * One agent: registry data, per-agent lifecycle, and the `fetch`/SSE transport to its per-agent daemon
+ * — the single `fetch` site (`send`), the root control stream (agent snapshot + session lifecycle), and
+ * the `SessionHandle` map. Per-session work rides a `SessionHandle` built by `session(id)`.
+ */
 export class Agent {
 	readonly config: AgentConfig;
-	private connection?: Connection;
-	private conversation?: AgentSession;
+	/** The resident `SessionHandle`s, keyed by session id. */
+	readonly sessions = new Map<string, SessionHandle>();
+
+	// Not readonly: `reconnect()` re-points the transport at a different daemon (the deploy handoff).
+	private base?: string;
+	private token?: string;
+	private agentState?: DaemonAgentState;
+	private controlAbort?: AbortController;
+	private readonly controlSubscribers = new Set<(e: DaemonControlEvent) => void>();
 
 	constructor(config: AgentConfig) {
 		this.config = config;
@@ -102,12 +154,14 @@ export class Agent {
 
 	/**
 	 * Find the agent's live daemon (config → /health) and attach, else spawn a detached `daemon <name>`
-	 * (the same command the OS service unit runs) and wait for it. Returns the live conversation.
+	 * (the same command the OS service unit runs) and wait for it. Ensures the control link; opens no
+	 * session (use `session(id)` / `listSessions()`).
 	 */
-	async open(): Promise<AgentSession> {
+	async connect(): Promise<void> {
 		const existing = loadDaemonConfig(this.name);
 		if (existing && (await isHealthy(existing.port))) {
-			return this.attach(`http://127.0.0.1:${existing.port}`, existing.token);
+			await this.attach(`http://127.0.0.1:${existing.port}`, existing.token);
+			return;
 		}
 
 		// The launch command goes through the running binary, since `steward` isn't on PATH in dev.
@@ -116,32 +170,128 @@ export class Agent {
 		child.unref();
 
 		const config = await waitForHealth(this.name);
-		return this.attach(`http://127.0.0.1:${config.port}`, config.token);
+		await this.attach(`http://127.0.0.1:${config.port}`, config.token);
 	}
 
-	/** Attach to a known daemon endpoint and return its live conversation. */
-	async attach(base: string, token: string): Promise<AgentSession> {
-		this.connection = await Connection.attach(base, token);
-		return this.createConversation();
+	/** Attach to a known daemon endpoint and open the control stream. */
+	async attach(base: string, token: string): Promise<void> {
+		this.base = base;
+		this.token = token;
+		await this.openControlStream();
 	}
 
-	/** The live conversation, or undefined if none created yet. Find-only — never creates. */
-	getConversation(): AgentSession | undefined {
-		return this.conversation;
+	/** The agent-global snapshot (config, cwd, session list) from the control stream's hello. */
+	getAgentState(): DaemonAgentState {
+		if (!this.agentState) throw new Error("Agent not connected. Call connect()/attach() first.");
+		return this.agentState;
 	}
 
-	/** Build a conversation proxy on the live connection and make it the live one. */
-	async createConversation(): Promise<AgentSession> {
-		if (!this.connection) throw new Error("Agent connection not open. Call open()/attach() first.");
-		this.conversation = await AgentSession.create(this.connection);
-		return this.conversation;
+	/** Subscribe to session lifecycle frames (added/removed/renamed) off the control stream. */
+	subscribeControl(cb: (e: DaemonControlEvent) => void): () => void {
+		this.controlSubscribers.add(cb);
+		return () => this.controlSubscribers.delete(cb);
+	}
+
+	/** The stored sessions (resident + idle), newest first — round-trips `GET /sessions`. */
+	async listSessions(): Promise<DaemonSessionSummary[]> {
+		const response = await fetch(`${this.base}/sessions`, {
+			headers: { authorization: `Bearer ${this.token}` },
+		});
+		const body = (await response.json()) as DaemonAgentState;
+		this.agentState = body;
+		return body.sessions;
+	}
+
+	/** Build (or return the cached) `SessionHandle` for a session id, opening its event stream. */
+	async session(id: string): Promise<SessionHandle> {
+		const existing = this.sessions.get(id);
+		if (existing) return existing;
+		const handle = await SessionHandle.create(this, id);
+		this.sessions.set(id, handle);
+		return handle;
+	}
+
+	/** Open the agent's most-recent session — the daemon guarantees at least one exists. */
+	async openLatestSession(): Promise<SessionHandle> {
+		const [latest] = await this.listSessions();
+		if (!latest) throw new Error(`No session for agent "${this.name}".`);
+		return this.session(latest.sessionId);
+	}
+
+	/** POST a command to a session's `/control` and unwrap the response. */
+	async send<T>(sessionId: string, cmd: DaemonCommand): Promise<T> {
+		const response = await fetch(`${this.base}/sessions/${sessionId}/control`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${this.token}` },
+			body: JSON.stringify(cmd),
+		});
+		const body = (await response.json()) as DaemonResponse;
+		if (!body.success) throw new Error(body.error);
+		return body.data as T;
+	}
+
+	/** Answer a parked daemon-side dialog for a session (fire-and-forget). */
+	async respondUi(sessionId: string, id: string, answer: Record<string, unknown>): Promise<void> {
+		await fetch(`${this.base}/sessions/${sessionId}/ui-response`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${this.token}` },
+			body: JSON.stringify({ type: "extension_ui_response", id, ...answer }),
+		});
+	}
+
+	/** The base URL + bearer token, for a `SessionHandle` to open its own event stream. */
+	endpoint(): { base: string; token: string } {
+		if (!this.base || !this.token) throw new Error("Agent not connected. Call connect()/attach() first.");
+		return { base: this.base, token: this.token };
+	}
+
+	/** Open the root control stream and resolve once the agent snapshot lands; consume frames in the background. */
+	private async openControlStream(): Promise<void> {
+		this.controlAbort = new AbortController();
+		const response = await fetch(`${this.base}/events`, {
+			headers: { authorization: `Bearer ${this.token}` },
+			signal: this.controlAbort.signal,
+		});
+		if (!response.ok || !response.body) {
+			throw new Error(`Failed to open daemon control stream (HTTP ${response.status}).`);
+		}
+		const hello = deferred<void>();
+		void consumeSSE(response.body, (event, data) => {
+			if (event === "hello") {
+				this.agentState = JSON.parse(data) as DaemonAgentState;
+				hello.resolve();
+				return;
+			}
+			const evt = JSON.parse(data) as DaemonControlEvent;
+			for (const subscriber of this.controlSubscribers) subscriber(evt);
+		});
+		await hello.promise;
 	}
 
 	/**
-	 * Tear the agent down: uninstall the OS service (so a supervised daemon won't relaunch), SIGTERM
-	 * any daemon still running (a birth daemon has no unit but is a live process), delete the home
-	 * dir, then drop the daemon config. `AgentSettingsManager.delete` touches only the agent home — never the shared
-	 * credential dir.
+	 * Re-point the transport at a different daemon (deploy handoff). The existing session streams are
+	 * dropped (the caller reopens sessions on the new daemon); the control subscriber set survives.
+	 */
+	async reconnect(port: number, token: string): Promise<void> {
+		this.controlAbort?.abort();
+		for (const handle of this.sessions.values()) handle.close();
+		this.sessions.clear();
+		this.base = `http://127.0.0.1:${port}`;
+		this.token = token;
+		await this.openControlStream();
+	}
+
+	/** Close every session stream and the control stream. */
+	close(): void {
+		for (const handle of this.sessions.values()) handle.close();
+		this.sessions.clear();
+		this.controlAbort?.abort();
+	}
+
+	/**
+	 * Tear the agent down: uninstall the OS service (so a supervised daemon won't relaunch), SIGTERM any
+	 * daemon still running (a birth daemon has no unit but is a live process), delete the home dir, then
+	 * drop the daemon config. `AgentSettingsManager.delete` touches only the agent home.
 	 */
 	delete(): { ok: boolean; method: "trash" | "unlink"; error?: string } {
 		getServiceManager().uninstall(this.name);
@@ -164,8 +314,8 @@ export class Agent {
 	 * Restart the agent's daemon so it picks up code changes (the in-process reload rebuilds only
 	 * resources, not the running binary). A supervised daemon (launchd/systemd unit) is bounced via the
 	 * service manager so its supervisor relaunches it; an unsupervised dev/birth daemon spawned by
-	 * `open()` is SIGTERMed and respawned here. Resolves once the replacement daemon (a new pid) is
-	 * healthy; the session resumes from disk, so in-memory turn state is lost.
+	 * `connect()` is SIGTERMed and respawned here. Resolves once the replacement daemon (a new pid) is
+	 * healthy; sessions resume from disk, so in-memory turn state is lost.
 	 */
 	async restart(): Promise<void> {
 		const existing = loadDaemonConfig(this.name);
@@ -192,177 +342,71 @@ export class Agent {
 }
 
 /**
- * The `fetch`/SSE transport to a per-agent daemon: the single `fetch` site (`send`), the `GET /events`
- * stream and its frame parsing, the cached hello snapshot, and the raw fan-out to subscribers. Private
- * to `Agent`; `AgentSession` rides it.
+ * The per-session proxy the TUI/`--print` drive: verbs round-trip through `agent.send(sessionId, …)`,
+ * and the session's event stream (`GET /sessions/:id/events`) arrives into the local snapshot/queue
+ * caches. Reads that change rarely (resource summary, commands) are served from the cache; per-turn
+ * reads (entries, messages) round-trip. Agent-global reads (config/cwd) come off the owning `Agent`.
  */
-export class Connection {
-	private snapshot!: DaemonSessionState;
-	private readonly subscribers = new Set<(e: ConnectionEvent) => void>();
-	private abortController?: AbortController;
-
-	onUiRequest?: (req: ExtensionUIRequest) => void;
-
-	// Not readonly: `reconnect()` re-points the transport at a different daemon (the deploy handoff).
-	private base: string;
-	private token: string;
-
-	private constructor(base: string, token: string) {
-		this.base = base;
-		this.token = token;
-	}
-
-	static async attach(base: string, token: string): Promise<Connection> {
-		const connection = new Connection(base, token);
-		await connection.connect();
-		return connection;
-	}
-
-	getSnapshot(): DaemonSessionState {
-		return this.snapshot;
-	}
-
-	subscribe(cb: (e: ConnectionEvent) => void): () => void {
-		this.subscribers.add(cb);
-		return () => this.subscribers.delete(cb);
-	}
-
-	async send<T>(cmd: DaemonCommand): Promise<T> {
-		const response = await fetch(`${this.base}/control`, {
-			method: "POST",
-			headers: { "content-type": "application/json", authorization: `Bearer ${this.token}` },
-			body: JSON.stringify(cmd),
-		});
-		const body = (await response.json()) as DaemonResponse;
-		if (!body.success) throw new Error(body.error);
-		return body.data as T;
-	}
-
-	/** Open the SSE stream and resolve once the hello snapshot lands; consume frames in the background. */
-	private async connect(): Promise<void> {
-		this.abortController = new AbortController();
-		const response = await fetch(`${this.base}/events`, {
-			headers: { authorization: `Bearer ${this.token}` },
-			signal: this.abortController.signal,
-		});
-		if (!response.ok || !response.body) {
-			throw new Error(`Failed to open daemon event stream (HTTP ${response.status}).`);
-		}
-		const hello = deferred<void>();
-		void this.consume(response.body, hello);
-		await hello.promise;
-	}
-
-	/**
-	 * Re-point the transport at a different daemon (deploy handoff). The subscriber set survives; the
-	 * fresh `connect()` delivers the new hello snapshot (read back via `getSnapshot`).
-	 */
-	async reconnect(port: number, token: string): Promise<void> {
-		this.close();
-		this.base = `http://127.0.0.1:${port}`;
-		this.token = token;
-		await this.connect();
-	}
-
-	close(): void {
-		this.abortController?.abort();
-	}
-
-	private async consume(body: ReadableStream<Uint8Array>, hello: Deferred<void>): Promise<void> {
-		const decoder = new TextDecoder();
-		let buffer = "";
-		try {
-			for await (const chunk of body) {
-				buffer += decoder.decode(chunk, { stream: true });
-				let boundary = buffer.indexOf("\n\n");
-				while (boundary >= 0) {
-					// A single malformed frame must not kill the stream: skip it, keep consuming.
-					try {
-						this.handleFrame(buffer.slice(0, boundary), hello);
-					} catch {}
-					buffer = buffer.slice(boundary + 2);
-					boundary = buffer.indexOf("\n\n");
-				}
-			}
-		} catch {
-			// The stream ended or was aborted.
-		}
-	}
-
-	/** Parse one SSE frame (`event:`/`data:`/comment lines; `data:` lines join with `\n`) and route it. */
-	private handleFrame(raw: string, hello: Deferred<void>): void {
-		let event = "message";
-		let data = "";
-		for (const line of raw.split("\n")) {
-			if (line.startsWith(":")) continue; // keepalive comment
-			if (line.startsWith("event:")) event = line.slice(6).trim();
-			else if (line.startsWith("data:")) data += (data ? "\n" : "") + line.slice(5).replace(/^ /, "");
-		}
-		if (!data) return;
-
-		if (event === "hello") {
-			this.snapshot = JSON.parse(data) as DaemonSessionState;
-			hello.resolve();
-			return;
-		}
-
-		const evt = JSON.parse(data) as ConnectionEvent | ExtensionUIRequest;
-		if (evt.type === "extension_ui_request") {
-			// Routed to the UI bridge, not the event subscribers.
-			this.onUiRequest?.(evt);
-			return;
-		}
-		for (const subscriber of this.subscribers) subscriber(evt);
-	}
-
-	/** Answer a parked daemon-side dialog (fire-and-forget). */
-	async respondUi(id: string, answer: Record<string, unknown>): Promise<void> {
-		await fetch(`${this.base}/ui-response`, {
-			method: "POST",
-			headers: { "content-type": "application/json", authorization: `Bearer ${this.token}` },
-			body: JSON.stringify({ type: "extension_ui_response", id, ...answer }),
-		});
-	}
-}
-
-/**
- * The per-conversation proxy the TUI/`--print` drive: verbs round-trip through `connection.send`, and
- * the event stream arrives via `connection.subscribe` into the local snapshot/queue caches. Reads that
- * change rarely (`config`/`cwd`, resource summary, commands) are served from the cached snapshot;
- * per-turn reads (entries, messages) round-trip.
- */
-export class AgentSession {
-	private readonly connection: Connection;
+export class SessionHandle {
+	private readonly agent: Agent;
+	readonly sessionId: string;
 	private snap: DaemonSessionState;
 	private queue: { steer: AgentMessage[]; followUp: AgentMessage[] } = { steer: [], followUp: [] };
 	private resourceSummary: ResourceSummary = { extensions: 0, skills: 0, prompts: 0, commands: 0, diagnostics: [] };
 	private commands: SlashCommandInfo[] = [];
 
 	private readonly handlers = new Set<(e: AgentHarnessEvent) => void>();
-	private readonly connectionUnsubscribe: () => void;
+	private streamAbort?: AbortController;
+	onUiRequest?: (req: ExtensionUIRequest) => void;
 
-	private constructor(connection: Connection) {
-		this.connection = connection;
-		// Seed from the hello snapshot; events keep it fresh.
-		this.snap = connection.getSnapshot();
-		this.connectionUnsubscribe = connection.subscribe((evt) => this.routeEvent(evt));
+	private constructor(agent: Agent, sessionId: string, snap: DaemonSessionState) {
+		this.agent = agent;
+		this.sessionId = sessionId;
+		this.snap = snap;
 	}
 
-	static async create(connection: Connection): Promise<AgentSession> {
-		const session = new AgentSession(connection);
-		await session.refreshResources();
-		return session;
+	static async create(agent: Agent, sessionId: string): Promise<SessionHandle> {
+		const { base, token } = agent.endpoint();
+		const abort = new AbortController();
+		const response = await fetch(`${base}/sessions/${sessionId}/events`, {
+			headers: { authorization: `Bearer ${token}` },
+			signal: abort.signal,
+		});
+		if (!response.ok || !response.body) {
+			throw new Error(`Failed to open session event stream for "${sessionId}" (HTTP ${response.status}).`);
+		}
+		const hello = deferred<DaemonSessionState>();
+		const handle = new SessionHandle(agent, sessionId, {
+			sessionId,
+			thinkingLevel: "off",
+			scopedModels: [],
+			isStreaming: false,
+			messageCount: 0,
+			pendingMessageCount: 0,
+		});
+		handle.streamAbort = abort;
+		void consumeSSE(response.body, (event, data) => handle.handleFrame(event, data, hello));
+		handle.snap = await hello.promise;
+		await handle.refreshResources();
+		return handle;
 	}
 
-	get onUiRequest(): ((req: ExtensionUIRequest) => void) | undefined {
-		return this.connection.onUiRequest;
-	}
-	set onUiRequest(handler: ((req: ExtensionUIRequest) => void) | undefined) {
-		this.connection.onUiRequest = handler;
+	/** Route one parsed SSE frame: hello → snapshot; extension-UI request → bridge; else event. */
+	private handleFrame(event: string, data: string, hello: Deferred<DaemonSessionState>): void {
+		if (event === "hello") {
+			hello.resolve(JSON.parse(data) as DaemonSessionState);
+			return;
+		}
+		const evt = JSON.parse(data) as SessionEvent | ExtensionUIRequest;
+		if (evt.type === "extension_ui_request") {
+			this.onUiRequest?.(evt);
+			return;
+		}
+		this.routeEvent(evt);
 	}
 
 	/** Update the caches off the stream, then fan harness events out to subscribers. */
-	private routeEvent(evt: ConnectionEvent): void {
+	private routeEvent(evt: SessionEvent): void {
 		switch (evt.type) {
 			case "model_update":
 				this.snap.model = evt.model;
@@ -383,16 +427,16 @@ export class AgentSession {
 
 	private async refreshResources(): Promise<void> {
 		const [resourceSummary, commands] = await Promise.all([
-			this.connection.send<ResourceSummary>({ type: "get_resource_summary" }),
-			this.connection.send<{ commands: SlashCommandInfo[] }>({ type: "get_commands" }),
+			this.agent.send<ResourceSummary>(this.sessionId, { type: "get_resource_summary" }),
+			this.agent.send<{ commands: SlashCommandInfo[] }>(this.sessionId, { type: "get_commands" }),
 		]);
 		this.resourceSummary = resourceSummary;
 		this.commands = commands.commands;
 	}
 
 	close(): void {
-		this.connectionUnsubscribe();
-		this.connection.close();
+		this.streamAbort?.abort();
+		this.agent.sessions.delete(this.sessionId);
 	}
 
 	subscribe(cb: (e: AgentHarnessEvent) => void): () => void {
@@ -404,7 +448,7 @@ export class AgentSession {
 		message: string,
 		opts?: { images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" },
 	): Promise<void> {
-		return this.connection.send({
+		return this.agent.send(this.sessionId, {
 			type: "prompt",
 			message,
 			images: opts?.images,
@@ -413,50 +457,45 @@ export class AgentSession {
 	}
 
 	compact(customInstructions?: string): Promise<unknown> {
-		return this.connection.send({ type: "compact", customInstructions });
+		return this.agent.send(this.sessionId, { type: "compact", customInstructions });
 	}
 
 	abort(): Promise<unknown> {
-		return this.connection.send({ type: "abort" });
+		return this.agent.send(this.sessionId, { type: "abort" });
 	}
 
 	waitForIdle(): Promise<void> {
-		return this.connection.send({ type: "wait_for_idle" });
+		return this.agent.send(this.sessionId, { type: "wait_for_idle" });
 	}
 
 	async reload(): Promise<void> {
-		await this.connection.send({ type: "reload" });
+		await this.agent.send(this.sessionId, { type: "reload" });
 		// A reload can change config-derived state, so refresh the snapshot too.
-		this.snap = await this.connection.send<DaemonSessionState>({ type: "get_state" });
+		this.snap = await this.agent.send<DaemonSessionState>(this.sessionId, { type: "get_state" });
 		await this.refreshResources();
 	}
 
-	async newSession(opts: { reason: "deploy" | "new" }): Promise<void> {
-		this.snap = await this.connection.send<DaemonSessionState>({ type: "new_session", reason: opts.reason });
-		await this.refreshResources();
+	/** Create a fresh session (additive) and return its snapshot — the caller opens + switches to it. */
+	createSession(): Promise<DaemonSessionState> {
+		return this.agent.send<DaemonSessionState>(this.sessionId, { type: "create_session" });
 	}
 
 	/**
-	 * Persist the deploy. The daemon flips the latch and registers the OS service; with a real backend
-	 * it also starts a supervised daemon on a new port, so we reconnect onto it (told apart from the
-	 * birth daemon by pid) and stop the birth daemon. The `none` backend keeps the same daemon.
+	 * Persist the deploy. The daemon flips the latch, registers the OS service, and creates a fresh
+	 * deployed session (returned); with a real backend it also starts a supervised daemon on a new port,
+	 * so we reconnect the agent's transport onto it (told apart from the birth daemon by pid) and stop the
+	 * birth daemon. The caller opens + switches to the returned session. The `none` backend stays put.
 	 */
-	async deploy(): Promise<void> {
+	async deploy(): Promise<DaemonSessionState> {
 		// Capture the birth daemon before its config is overwritten by the supervised one.
-		const birth = loadDaemonConfig(this.config.name);
+		const birth = loadDaemonConfig(this.agent.name);
+		const snap = await this.agent.send<DaemonSessionState>(this.sessionId, { type: "deploy" });
 
-		this.snap = await this.connection.send<DaemonSessionState>({ type: "deploy" });
+		if (getServiceManager().kind === "none") return snap;
 
-		if (getServiceManager().kind === "none") {
-			await this.refreshResources();
-			return;
-		}
-
-		// Wait for the supervised daemon (a different pid), then move our transport onto it.
-		const supervised = await waitForHealth(this.config.name, (cfg) => cfg.pid !== birth?.pid);
-		await this.connection.reconnect(supervised.port, supervised.token);
-		this.snap = this.connection.getSnapshot();
-		await this.refreshResources();
+		// Wait for the supervised daemon (a different pid), then move the agent's transport onto it.
+		const supervised = await waitForHealth(this.agent.name, (cfg) => cfg.pid !== birth?.pid);
+		await this.agent.reconnect(supervised.port, supervised.token);
 
 		// Stop the birth daemon; its shutdown won't touch the now-supervised config.
 		if (birth) {
@@ -466,35 +505,36 @@ export class AgentSession {
 				// Already gone.
 			}
 		}
+		return snap;
 	}
 
 	clearQueue(): Promise<{ steering: AgentMessage[]; followUp: AgentMessage[] }> {
-		return this.connection.send({ type: "clear_queue" });
+		return this.agent.send(this.sessionId, { type: "clear_queue" });
 	}
 
 	seedAssistantMessage(text: string): Promise<AssistantMessage> {
-		return this.connection.send({ type: "seed_assistant_message", text });
+		return this.agent.send(this.sessionId, { type: "seed_assistant_message", text });
 	}
 
 	appendMessage(message: AgentMessage): Promise<void> {
-		return this.connection.send({ type: "append_message", message });
+		return this.agent.send(this.sessionId, { type: "append_message", message });
 	}
 
 	// ---- Plugin verbs: single-writer mutations the daemon applies, then self-reloads ----
 	installPlugin(source: string): Promise<void> {
-		return this.connection.send({ type: "install_plugin", source });
+		return this.agent.send(this.sessionId, { type: "install_plugin", source });
 	}
 
 	removePlugin(source: string): Promise<{ removed: boolean }> {
-		return this.connection.send({ type: "remove_plugin", source });
+		return this.agent.send(this.sessionId, { type: "remove_plugin", source });
 	}
 
 	updatePlugins(source?: string): Promise<void> {
-		return this.connection.send({ type: "update_plugins", source });
+		return this.agent.send(this.sessionId, { type: "update_plugins", source });
 	}
 
 	async onboardPlugin(source: string): Promise<OnboardServiceResult[]> {
-		const { results } = await this.connection.send<{ results: OnboardServiceResult[] }>({
+		const { results } = await this.agent.send<{ results: OnboardServiceResult[] }>(this.sessionId, {
 			type: "onboard_plugin",
 			source,
 		});
@@ -503,58 +543,68 @@ export class AgentSession {
 
 	/** Per-turn read — round-trips. */
 	async getEntries(): Promise<SessionTreeEntry[]> {
-		const { entries } = await this.connection.send<{ entries: SessionTreeEntry[] }>({ type: "get_entries" });
+		const { entries } = await this.agent.send<{ entries: SessionTreeEntry[] }>(this.sessionId, {
+			type: "get_entries",
+		});
 		return entries;
 	}
 
 	async listTools(): Promise<{ tools: ToolInfo[]; activeToolNames: string[] }> {
-		return this.connection.send<{ tools: ToolInfo[]; activeToolNames: string[] }>({ type: "get_tool_info" });
+		return this.agent.send<{ tools: ToolInfo[]; activeToolNames: string[] }>(this.sessionId, {
+			type: "get_tool_info",
+		});
 	}
 
 	async listIntegrations(): Promise<IntegrationInfo[]> {
-		return (await this.connection.send<{ integrations: IntegrationInfo[] }>({ type: "get_integration_info" }))
-			.integrations;
+		return (
+			await this.agent.send<{ integrations: IntegrationInfo[] }>(this.sessionId, { type: "get_integration_info" })
+		).integrations;
 	}
 
 	async listSkills(): Promise<Skill[]> {
-		return (await this.connection.send<{ skills: Skill[] }>({ type: "get_skills" })).skills;
+		return (await this.agent.send<{ skills: Skill[] }>(this.sessionId, { type: "get_skills" })).skills;
 	}
 
 	async listPlugins(): Promise<ConfiguredPlugin[]> {
-		return (await this.connection.send<{ plugins: ConfiguredPlugin[] }>({ type: "get_plugins" })).plugins;
+		return (await this.agent.send<{ plugins: ConfiguredPlugin[] }>(this.sessionId, { type: "get_plugins" })).plugins;
 	}
 
 	async listContexts(): Promise<ContextInfo[]> {
-		return (await this.connection.send<{ contexts: ContextInfo[] }>({ type: "get_context_info" })).contexts;
+		return (await this.agent.send<{ contexts: ContextInfo[] }>(this.sessionId, { type: "get_context_info" }))
+			.contexts;
 	}
 
 	async getAvailableModels(): Promise<Model<Api>[]> {
-		return (await this.connection.send<{ models: Model<Api>[] }>({ type: "get_available_models" })).models;
+		return (await this.agent.send<{ models: Model<Api>[] }>(this.sessionId, { type: "get_available_models" })).models;
 	}
 
 	/** Switch the live model; the daemon persists the default and emits model_update. */
 	setModel(provider: string, modelId: string): Promise<Model<Api>> {
-		return this.connection.send({ type: "set_model", provider, modelId });
+		return this.agent.send(this.sessionId, { type: "set_model", provider, modelId });
 	}
 
 	async getLoginProviderOptions(authType?: "oauth" | "api_key"): Promise<AuthSelectorProvider[]> {
 		return (
-			await this.connection.send<{ providers: AuthSelectorProvider[] }>({ type: "get_login_providers", authType })
+			await this.agent.send<{ providers: AuthSelectorProvider[] }>(this.sessionId, {
+				type: "get_login_providers",
+				authType,
+			})
 		).providers;
 	}
 
 	async getLogoutProviderOptions(): Promise<AuthSelectorProvider[]> {
-		return (await this.connection.send<{ providers: AuthSelectorProvider[] }>({ type: "get_logout_providers" }))
-			.providers;
+		return (
+			await this.agent.send<{ providers: AuthSelectorProvider[] }>(this.sessionId, { type: "get_logout_providers" })
+		).providers;
 	}
 
 	/** Run a provider login daemon-side (credentials never cross the wire); OAuth prompts round-trip via respondUi. */
 	login(provider: string, authType: "oauth" | "api_key"): Promise<void> {
-		return this.connection.send({ type: "login", provider, authType });
+		return this.agent.send(this.sessionId, { type: "login", provider, authType });
 	}
 
 	logout(provider: string): Promise<void> {
-		return this.connection.send({ type: "logout", provider });
+		return this.agent.send(this.sessionId, { type: "logout", provider });
 	}
 
 	getModel(): Model<Api> | undefined {
@@ -567,12 +617,12 @@ export class AgentSession {
 
 	/** Switch the session-only scope; the daemon resolves the patterns and emits scoped_models_update. */
 	setScopedModels(enabledModelIds: string[]): Promise<void> {
-		return this.connection.send({ type: "set_scoped_models", enabledModelIds });
+		return this.agent.send(this.sessionId, { type: "set_scoped_models", enabledModelIds });
 	}
 
 	/** Persist the agent-tier scoped-model shortlist to agent.json. */
 	setEnabledModels(enabledModels: string[] | undefined): Promise<void> {
-		return this.connection.send({ type: "set_enabled_models", enabledModels });
+		return this.agent.send(this.sessionId, { type: "set_enabled_models", enabledModels });
 	}
 
 	getThinkingLevel(): ThinkingLevel {
@@ -587,22 +637,28 @@ export class AgentSession {
 	}
 
 	setThinkingLevel(level: ThinkingLevel): Promise<void> {
-		return this.connection.send({ type: "set_thinking_level", level });
+		return this.agent.send(this.sessionId, { type: "set_thinking_level", level });
 	}
 
 	/** Per-turn read — round-trips (only `.messages` is consumed client-side). */
 	async buildSessionContext(): Promise<SessionContext> {
-		const { messages } = await this.connection.send<{ messages: AgentMessage[] }>({ type: "get_messages" });
+		const { messages } = await this.agent.send<{ messages: AgentMessage[] }>(this.sessionId, {
+			type: "get_messages",
+		});
 		return { messages, thinkingLevel: this.snap.thinkingLevel, model: null, activeToolNames: null };
 	}
 
 	// ---- Snapshot reads — no round-trip ----
-	get config(): DaemonSessionState["config"] {
-		return this.snap.config;
+	get config(): AgentConfig {
+		return this.agent.getAgentState().config;
 	}
 
 	getCwd(): string {
-		return this.snap.cwd;
+		return this.agent.getAgentState().cwd;
+	}
+
+	getSessionName(): string | undefined {
+		return this.snap.sessionName;
 	}
 
 	getResourceSummary(): ResourceSummary {
@@ -640,7 +696,7 @@ export class AgentSession {
 	}
 
 	respondUi(id: string, answer: Record<string, unknown>): Promise<void> {
-		return this.connection.respondUi(id, answer);
+		return this.agent.respondUi(this.sessionId, id, answer);
 	}
 }
 
