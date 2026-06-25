@@ -171,6 +171,7 @@ export {
 	IntegrationRunner,
 	type IntegrationRuntime,
 	type IntegrationRuntimeState,
+	type IntegrationStoreHandle,
 	type IntegrationsAPI,
 	type LoadIntegrationsResult,
 	loadIntegrationFromFactory,

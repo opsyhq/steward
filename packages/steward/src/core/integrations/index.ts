@@ -20,6 +20,7 @@ export type {
 	IntegrationRunContext,
 	IntegrationRuntime,
 	IntegrationRuntimeState,
+	IntegrationStoreHandle,
 	IntegrationsAPI,
 	LoadIntegrationsResult,
 } from "./types.ts";
