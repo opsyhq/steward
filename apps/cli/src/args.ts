@@ -55,7 +55,8 @@ Usage:
   ${APP_NAME} delete <name>                                Delete an agent (type-the-name confirm)
   ${APP_NAME} restart <name>                               Restart an agent's daemon (picks up code changes)
   ${APP_NAME} <name> plugins <install|remove|list|update|configure> [source]   Manage an agent's plugins
-  ${APP_NAME} <name> [message] [--print]                   Talk to an agent
+  ${APP_NAME} <name>                                       Open an interactive chat with an agent
+  ${APP_NAME} <name> --print <message>                     Single-shot: send a message, print the reply, exit
 
 Options:
   --print, -p             Single-shot print mode

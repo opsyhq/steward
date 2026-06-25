@@ -1,8 +1,8 @@
 /**
  * `@opsyhq/cli` dispatch.
  *
- * Agent surfaces are daemon clients: interactive `<name>`, the one-shot `--print`/inline-message
- * path, and `new` (birth chat) connect to the agent's daemon (spawning one if needed) and drive a
+ * Agent surfaces are daemon clients: interactive `<name>`, the one-shot `--print` path (single-shot,
+ * requires an inline message), and `new` (birth chat) connect to the agent's daemon (spawning one if needed) and drive a
  * `SessionHandle` — the CLI never builds a `SessionHost`. `new`/`list`/`delete` are local commands; the
  * agent-scoped `<name> plugins ...` subcommand routes its mutating arms to the daemon (the single
  * writer); the hidden `daemon` subcommand runs the engine's `runDaemon` in-process (the
@@ -72,7 +72,15 @@ export async function main(argv: string[]): Promise<number> {
 		process.stderr.write(`Unknown agent "${command}". Create it with: ${APP_NAME} new ${command}\n`);
 		return 1;
 	}
-	if (args.print || message) {
+	// A bare `<name> <message>` (inline message without `--print`) has no interactive-send path yet,
+	// so reject it rather than silently routing to a single-shot model turn.
+	if (message && !args.print) {
+		process.stderr.write(
+			`Inline messages need --print: ${APP_NAME} ${command} --print "<message>" (or run ${APP_NAME} ${command} for interactive chat)\n`,
+		);
+		return 1;
+	}
+	if (args.print) {
 		if (!message) {
 			process.stderr.write(`Print mode needs a message: ${APP_NAME} ${command} --print "<message>"\n`);
 			return 1;
