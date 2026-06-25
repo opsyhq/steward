@@ -336,6 +336,8 @@ export async function runPlugins(agent: string, rest: string[], help = false): P
 		console.error(chalk.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
 		return 1;
 	} finally {
-		session.close();
+		// Close the whole agent connection, not just this session: connect() opened the control
+		// stream too, and leaving it open keeps the process alive (the command never exits).
+		handle.close();
 	}
 }
