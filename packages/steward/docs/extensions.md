@@ -774,6 +774,8 @@ session.sessionManager.getLabel(entryId)  // Label on an entry, if any
 session.sessionManager.getSessionFile()   // Session file path, or undefined
 ```
 
+To write tags onto a session, use `appendTags(tags: Record<string, string>): Promise<string>` — the method to call on the `SessionManager` handed to a `createSession({ setup })` callback. (`session.getTags()` / `session.setTags(tags)` read and replace the live session's folded tags; `appendTags` is the additive form used when seeding a freshly created session.)
+
 #### session.model
 
 The current model, or `undefined`. For the model registry and API keys, use `steward.modelRegistry` (see [ExtensionAPI Methods](#extensionapi-methods)).

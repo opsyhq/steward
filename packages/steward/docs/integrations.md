@@ -278,7 +278,16 @@ interface IntegrationOnboardContext {
 type IntegrationOnboardUI = Pick<ExtensionUIContext, "select" | "confirm" | "input" | "notify">;
 ```
 
-The `ui` surface is narrowed to the four dialog primitives — `select`, `confirm`, `input`, `notify`. Chat chrome (editors, widgets, custom components) is excluded because onboarding dialogs serialize to attached clients over the wire; calling anything outside this set is a compile error, not a silent no-op.
+The `ui` surface is narrowed to the four dialog primitives. Chat chrome (editors, widgets, custom components) is excluded because onboarding dialogs serialize to attached clients over the wire; calling anything outside this set is a compile error, not a silent no-op.
+
+```typescript
+ui.select(title: string, options: string[], opts?): Promise<string | undefined>;
+ui.confirm(title: string, message: string, opts?): Promise<boolean>;
+ui.input(title: string, placeholder?: string, opts?): Promise<string | undefined>;
+ui.notify(message: string, type?: "info" | "warning" | "error"): void;
+```
+
+`select` and `input` resolve to `undefined` when the user cancels (escape) — branch on it to abort onboarding by returning `undefined`. `confirm` resolves to a boolean. `notify` is fire-and-forget.
 
 What the host does with the returned record:
 
