@@ -12,10 +12,12 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { type Static, Type } from "typebox";
 import { Compile } from "typebox/compile";
 import {
+	allocatePort,
 	getAgentConfigPath,
 	getAgentDir,
 	getAgentsRoot,
@@ -168,13 +170,21 @@ function sharedDefaultModelReference(): string | undefined {
 // agent.json schema
 // =============================================================================
 
-export const AGENT_SCHEMA_VERSION = 1;
+export const AGENT_SCHEMA_VERSION = 2;
 
 export const AgentConfigSchema = Type.Object({
 	schemaVersion: Type.Number(),
 	name: Type.String(),
 	purpose: Type.String(),
 	createdAt: Type.String(),
+	/**
+	 * The fixed loopback port the agent's daemon binds, allocated at creation. Required: an agent.json
+	 * without it (a pre-fixed-port agent) fails validation loudly — a clear "recreate this agent" signal
+	 * rather than a silent fallback to an ephemeral port.
+	 */
+	port: Type.Number(),
+	/** The bearer token authenticating the daemon's `/events` + `/control`, minted at creation. */
+	token: Type.String(),
 	/**
 	 * The single human-held latch. `null` (or absent) means the agent is still in
 	 * its birth phase — it maintains its own files but may not act unattended. An
@@ -287,12 +297,17 @@ export class AgentSettingsManager {
 		mkdirSync(getSessionsDir(name), { recursive: true });
 		mkdirSync(getWorkspaceDir(name), { recursive: true });
 
+		// Skip ports already claimed by other agents; the daemon still fails loud on EADDRINUSE if the
+		// pick is taken by some non-steward process when it actually binds.
+		const usedPorts = new Set(AgentSettingsManager.list().map((store) => store.config.port));
 		const config: AgentConfig = {
 			schemaVersion: AGENT_SCHEMA_VERSION,
 			name,
 			purpose: purpose ?? "",
 			createdAt: new Date().toISOString(),
 			deployedAt: null,
+			port: allocatePort(usedPorts),
+			token: randomBytes(32).toString("hex"),
 			...(model ? { settings: { defaultModel: model } } : {}),
 		};
 		AgentSettingsManager.saveConfig(name, config);

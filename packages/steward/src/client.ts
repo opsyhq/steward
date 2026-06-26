@@ -15,9 +15,10 @@ import {
 	type Model,
 } from "@earendil-works/pi-ai";
 import type { AgentHarnessEvent, AgentMessage, SessionContext, SessionTreeEntry, ThinkingLevel } from "@opsyhq/agent";
+import { getDaemonHost, resolveDaemonToken } from "./config.ts";
 import type { ContextInfo, IntegrationInfo } from "./core/agent-runtime.ts";
 import { type AgentConfig, AgentSettingsManager } from "./core/agent-settings-manager.ts";
-import { type DaemonConfig, deleteDaemonConfig, loadDaemonConfig } from "./core/daemon-config.ts";
+import { isHealthy, requestDaemonShutdown, waitForHealth, waitForShutdown } from "./core/daemon-health.ts";
 import { THINKING_LEVELS } from "./core/defaults.ts";
 import type { ResourceSummary } from "./core/diagnostics.ts";
 import type {
@@ -47,9 +48,6 @@ import type {
 	ScopedModelsUpdateEvent,
 } from "./types.ts";
 
-const HEALTH_TIMEOUT_MS = 15_000;
-const HEALTH_POLL_MS = 150;
-
 interface Deferred<T> {
 	promise: Promise<T>;
 	resolve: (value: T) => void;
@@ -65,8 +63,6 @@ function deferred<T>(): Deferred<T> {
 	});
 	return { promise, resolve, reject };
 }
-
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 type SessionEvent = AgentHarnessEvent | ScopedModelsUpdateEvent;
 
@@ -205,19 +201,20 @@ export class Agent {
 	 * session (use `getSession(id)` / `getLatestSession()`).
 	 */
 	async connect(): Promise<void> {
-		// Use the live daemon if its config points at a healthy port; otherwise spawn a detached
-		// `daemon <name>` (the same command the OS service unit runs) and wait for it.
-		const existing = loadDaemonConfig(this.name);
-		let config: { port: number; token: string } | undefined =
-			existing && (await isHealthy(existing.port)) ? existing : undefined;
-		if (!config) {
+		// The agent's fixed port + token live in agent.json. Attach if the daemon is already healthy on
+		// that port; otherwise spawn a detached `daemon <name>` (the same command the OS service unit
+		// runs) and wait for it.
+		const { port, token: persisted } = AgentSettingsManager.create(this.name).config;
+		const base = `http://${getDaemonHost()}:${port}`;
+		const token = resolveDaemonToken(persisted);
+		if (!(await isHealthy(base))) {
 			// The launch command goes through the running binary, since `steward` isn't on PATH in dev.
 			const [command, ...commandArgs] = daemonLaunchCommand(this.name);
 			spawn(command, commandArgs, { detached: true, stdio: "ignore" }).unref();
-			config = await waitForHealth(this.name);
+			await waitForHealth(base);
 		}
-		this.base = `http://127.0.0.1:${config.port}`;
-		this.token = config.token;
+		this.base = base;
+		this.token = token;
 		await this.openControlStream(this.base, this.token);
 	}
 
@@ -294,14 +291,17 @@ export class Agent {
 	}
 
 	/**
-	 * Commit the deploy. The daemon flips the latch, registers the OS service, and creates a fresh
-	 * deployed session (returned); with a real backend it also starts a supervised daemon on a new port,
-	 * so the transport reconnects onto it (told apart from the birth daemon by pid) and the birth daemon
-	 * is stopped. The caller opens + switches to the returned session. The `none` backend stays put.
+	 * Commit the deploy. The daemon flips the latch, registers the OS service unit, and creates a fresh
+	 * deployed session (returned). With a real backend the client then drives a stop-then-start handoff on
+	 * the agent's fixed port: shut the birth daemon down, wait for the port to free, start the supervised
+	 * unit's daemon (which rebinds the same port and resumes the deployed session), and reconnect. ~1s
+	 * socket gap; no state loss (the session is on disk). The caller opens + switches to the returned
+	 * session. The `none` backend has no supervisor, so the birth daemon stays put.
 	 */
 	async deploy(): Promise<DaemonSessionState> {
-		// Capture the birth daemon before its config is overwritten by the supervised one.
-		const birth = loadDaemonConfig(this.name);
+		const { port, token: persisted } = AgentSettingsManager.create(this.name).config;
+		const base = `http://${getDaemonHost()}:${port}`;
+		const token = resolveDaemonToken(persisted);
 		// Routed like create_session (agent-global, but posted to a session's /control): use the latest.
 		const [latest] = this.getAgentState().sessions;
 		if (!latest) throw new Error(`No session for agent "${this.name}".`);
@@ -309,24 +309,21 @@ export class Agent {
 
 		if (getServiceManager().kind === "none") return snap;
 
-		// Wait for the supervised daemon (a different pid), then move the transport onto it: close the old
-		// control + session streams (sessions reopen on the new daemon) and reconnect.
-		const supervised = await waitForHealth(this.name, (cfg) => cfg.pid !== birth?.pid);
+		// Stop the birth daemon and wait for the fixed port to free, then start the supervised unit's
+		// daemon on that same port.
+		await requestDaemonShutdown(base, token);
+		await waitForShutdown(base);
+		getServiceManager().start(this.name);
+		await waitForHealth(base);
+
+		// Reconnect onto the (same-address) supervised daemon: close the old control + session streams
+		// (sessions reopen on the new daemon) and reconnect.
 		this.controlStream?.close();
 		for (const handle of this.sessions.values()) handle.close();
 		this.sessions.clear();
-		this.base = `http://127.0.0.1:${supervised.port}`;
-		this.token = supervised.token;
-		await this.openControlStream(this.base, this.token);
-
-		// Stop the birth daemon; its shutdown won't touch the now-supervised config.
-		if (birth) {
-			try {
-				process.kill(birth.pid, "SIGTERM");
-			} catch {
-				// Already gone.
-			}
-		}
+		this.base = base;
+		this.token = token;
+		await this.openControlStream(base, token);
 		return snap;
 	}
 
@@ -355,25 +352,22 @@ export class Agent {
 	}
 
 	/**
-	 * Tear the agent down: uninstall the OS service (so a supervised daemon won't relaunch), SIGTERM any
-	 * daemon still running (a birth daemon has no unit but is a live process), delete the home dir, then
-	 * drop the daemon config. `AgentSettingsManager.delete` touches only the agent home.
+	 * Tear the agent down: uninstall the OS service (so a supervised daemon won't relaunch), ask any
+	 * daemon still running to shut down (a birth daemon has no unit but is a live process), then delete
+	 * the home dir. `AgentSettingsManager.delete` touches only the agent home.
 	 */
-	delete(): { ok: boolean; method: "trash" | "unlink"; error?: string } {
+	async delete(): Promise<{ ok: boolean; method: "trash" | "unlink"; error?: string }> {
 		getServiceManager().uninstall(this.name);
 
-		const daemon = loadDaemonConfig(this.name);
-		if (daemon) {
-			try {
-				process.kill(daemon.pid, "SIGTERM");
-			} catch {
-				// Already gone.
-			}
+		// Best-effort shutdown of a running daemon, read straight from agent.json (the agent may not be
+		// connected). A missing/invalid config just means nothing to stop.
+		const store = AgentSettingsManager.get(this.name);
+		if (store) {
+			const base = `http://${getDaemonHost()}:${store.config.port}`;
+			await requestDaemonShutdown(base, resolveDaemonToken(store.config.token));
 		}
 
-		const result = AgentSettingsManager.delete(this.name);
-		if (result.ok) deleteDaemonConfig(this.name);
-		return result;
+		return AgentSettingsManager.delete(this.name);
 	}
 
 	/**
@@ -384,26 +378,25 @@ export class Agent {
 	 * healthy; sessions resume from disk, so in-memory turn state is lost.
 	 */
 	async restart(): Promise<void> {
-		const existing = loadDaemonConfig(this.name);
+		const { port, token: persisted } = AgentSettingsManager.create(this.name).config;
+		const base = `http://${getDaemonHost()}:${port}`;
+		const token = resolveDaemonToken(persisted);
 		const service = getServiceManager();
 
-		if (service.kind !== "none" && service.isRunning(this.name)) {
+		if (service.kind !== "none" && (await service.isRunning(this.name))) {
+			// Bounce the supervised unit: stop, wait for the fixed port to free, then start its replacement.
 			service.stop(this.name);
+			await waitForShutdown(base);
 			service.start(this.name);
 		} else {
-			if (existing) {
-				try {
-					process.kill(existing.pid, "SIGTERM");
-				} catch {
-					// Already gone.
-				}
-			}
+			// Unsupervised dev/birth daemon: ask it to exit, wait for the port, then respawn it directly.
+			await requestDaemonShutdown(base, token);
+			await waitForShutdown(base);
 			const [command, ...commandArgs] = daemonLaunchCommand(this.name);
-			const child = spawn(command, commandArgs, { detached: true, stdio: "ignore" });
-			child.unref();
+			spawn(command, commandArgs, { detached: true, stdio: "ignore" }).unref();
 		}
 
-		await waitForHealth(this.name, (cfg) => cfg.pid !== existing?.pid);
+		await waitForHealth(base);
 	}
 }
 
@@ -718,38 +711,4 @@ export class SessionHandle {
 	respondUi(id: string, answer: Record<string, unknown>): Promise<void> {
 		return this.agent.respondUi(this.sessionId, id, answer);
 	}
-}
-
-/** `GET /health` (no auth) answers `{status:"ok"}` while the daemon is listening. */
-export async function isHealthy(port: number): Promise<boolean> {
-	try {
-		const response = await fetch(`http://127.0.0.1:${port}/health`, {
-			signal: AbortSignal.timeout(1000),
-		});
-		if (!response.ok) return false;
-		const body = (await response.json()) as { status?: string };
-		return body.status === "ok";
-	} catch {
-		return false;
-	}
-}
-
-/**
- * Poll the config + `/health` until a matching daemon answers (or time out). The optional predicate
- * narrows which config counts — the deploy handoff waits for the supervised daemon (a pid different
- * from the outgoing birth daemon's).
- */
-export async function waitForHealth(
-	name: string,
-	predicate: (config: DaemonConfig) => boolean = () => true,
-): Promise<{ pid: number; port: number; token: string }> {
-	const deadline = Date.now() + HEALTH_TIMEOUT_MS;
-	while (Date.now() < deadline) {
-		const config = loadDaemonConfig(name);
-		if (config && predicate(config) && (await isHealthy(config.port))) {
-			return { pid: config.pid, port: config.port, token: config.token };
-		}
-		await sleep(HEALTH_POLL_MS);
-	}
-	throw new Error(`Daemon for "${name}" did not become healthy within ${HEALTH_TIMEOUT_MS / 1000}s.`);
 }

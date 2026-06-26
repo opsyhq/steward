@@ -69,8 +69,12 @@ export const ENV_HOME = `${APP_NAME.toUpperCase()}_HOME`;
 export const ENV_SHARED_AGENT_DIR = `${APP_NAME.toUpperCase()}_SHARED_DIR`;
 
 // Override for a daemon's bearer token, e.g. STEWARD_DAEMON_TOKEN. When set, the
-// daemon authenticates with this value instead of minting an ephemeral one.
+// daemon authenticates with this value instead of the token persisted in agent.json.
 export const ENV_DAEMON_TOKEN = `${APP_NAME.toUpperCase()}_DAEMON_TOKEN`;
+
+// Override for the host the daemon binds, e.g. STEWARD_DAEMON_HOST. Defaults to loopback
+// (`127.0.0.1`); set `0.0.0.0` to make the daemon reachable off-box (VPS use).
+export const ENV_DAEMON_HOST = `${APP_NAME.toUpperCase()}_DAEMON_HOST`;
 
 // Force the OS service backend, e.g. STEWARD_SERVICE_MANAGER=none|launchd|systemd. Overrides
 // the platform autodetect — `none` keeps deploy from registering a real launchd/systemd unit
@@ -218,14 +222,41 @@ export function getWorkspaceDir(name: string): string {
 // Ephemeral daemon runtime state (OS temp dir, cleared on reboot)
 // =============================================================================
 
-/** Root dir for daemon runtime descriptors, e.g. $TMPDIR/steward-daemons. */
+/** Root dir for daemon log files (launchd/systemd stdout/stderr), e.g. $TMPDIR/steward-daemons. */
 export function getDaemonRuntimeDir(): string {
 	return join(tmpdir(), `${APP_NAME}-daemons`);
 }
 
-/** Path to an agent's ephemeral daemon descriptor (the running daemon's pid/port/token). */
-export function getAgentDaemonPath(name: string): string {
-	return join(getDaemonRuntimeDir(), `${name}.json`);
+/** The host the daemon binds, e.g. STEWARD_DAEMON_HOST. Defaults to loopback. */
+export function getDaemonHost(): string {
+	return process.env[ENV_DAEMON_HOST]?.trim() || "127.0.0.1";
+}
+
+/**
+ * The daemon bearer token: the `STEWARD_DAEMON_TOKEN` override if set, else the token persisted in
+ * agent.json. Resolved identically by the daemon (when binding) and the client (when attaching) so the
+ * two always agree.
+ */
+export function resolveDaemonToken(persisted: string): string {
+	return process.env[ENV_DAEMON_TOKEN]?.trim() || persisted;
+}
+
+// The fixed per-agent port is drawn from a high range that avoids the well-known/registered ports
+// where other services tend to live.
+const PORT_MIN = 20000;
+const PORT_MAX = 60000;
+
+/**
+ * Pick a port for a new agent, skipping any in `used` (the ports already claimed by other agents).
+ * A random pick in a high range, not a live bind: "free now" is not guaranteed to be "free at daemon
+ * start", and the daemon fails loud on `EADDRINUSE` if the port is taken when it actually binds.
+ */
+export function allocatePort(used: ReadonlySet<number> = new Set()): number {
+	for (let i = 0; i < 1000; i++) {
+		const port = PORT_MIN + Math.floor(Math.random() * (PORT_MAX - PORT_MIN + 1));
+		if (!used.has(port)) return port;
+	}
+	throw new Error("Could not allocate a free port for the agent.");
 }
 
 // =============================================================================
