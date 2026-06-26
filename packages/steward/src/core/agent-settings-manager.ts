@@ -17,7 +17,6 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { type Static, Type } from "typebox";
 import { Compile } from "typebox/compile";
 import {
-	allocatePort,
 	getAgentConfigPath,
 	getAgentDir,
 	getAgentsRoot,
@@ -177,13 +176,9 @@ export const AgentConfigSchema = Type.Object({
 	name: Type.String(),
 	purpose: Type.String(),
 	createdAt: Type.String(),
-	/**
-	 * The fixed loopback port the agent's daemon binds, allocated at creation. Required: an agent.json
-	 * without it (a pre-fixed-port agent) fails validation loudly — a clear "recreate this agent" signal
-	 * rather than a silent fallback to an ephemeral port.
-	 */
+	/** The fixed port the agent's daemon binds, allocated at creation (required; missing → fails loud). */
 	port: Type.Number(),
-	/** The bearer token authenticating the daemon's `/events` + `/control`, minted at creation. */
+	/** The bearer token for the daemon's `/events` + `/control`, minted at creation. */
 	token: Type.String(),
 	/**
 	 * The single human-held latch. `null` (or absent) means the agent is still in
@@ -297,16 +292,23 @@ export class AgentSettingsManager {
 		mkdirSync(getSessionsDir(name), { recursive: true });
 		mkdirSync(getWorkspaceDir(name), { recursive: true });
 
-		// Skip ports already claimed by other agents; the daemon still fails loud on EADDRINUSE if the
-		// pick is taken by some non-steward process when it actually binds.
+		// A random high port, skipping any already claimed by another agent. Not a live bind: the daemon
+		// fails loud on EADDRINUSE if it is taken when it actually binds.
 		const usedPorts = new Set(AgentSettingsManager.list().map((store) => store.config.port));
+		let port = 0;
+		for (let i = 0; i < 1000 && !port; i++) {
+			const candidate = 20000 + Math.floor(Math.random() * 40001);
+			if (!usedPorts.has(candidate)) port = candidate;
+		}
+		if (!port) throw new Error("Could not allocate a free port for the agent.");
+
 		const config: AgentConfig = {
 			schemaVersion: AGENT_SCHEMA_VERSION,
 			name,
 			purpose: purpose ?? "",
 			createdAt: new Date().toISOString(),
 			deployedAt: null,
-			port: allocatePort(usedPorts),
+			port,
 			token: randomBytes(32).toString("hex"),
 			...(model ? { settings: { defaultModel: model } } : {}),
 		};

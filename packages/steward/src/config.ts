@@ -219,7 +219,7 @@ export function getWorkspaceDir(name: string): string {
 }
 
 // =============================================================================
-// Ephemeral daemon runtime state (OS temp dir, cleared on reboot)
+// Daemon runtime (host/token/logs)
 // =============================================================================
 
 /** Root dir for daemon log files (launchd/systemd stdout/stderr), e.g. $TMPDIR/steward-daemons. */
@@ -227,36 +227,14 @@ export function getDaemonRuntimeDir(): string {
 	return join(tmpdir(), `${APP_NAME}-daemons`);
 }
 
-/** The host the daemon binds, e.g. STEWARD_DAEMON_HOST. Defaults to loopback. */
+/** The host the daemon binds (STEWARD_DAEMON_HOST), defaulting to loopback. */
 export function getDaemonHost(): string {
 	return process.env[ENV_DAEMON_HOST]?.trim() || "127.0.0.1";
 }
 
-/**
- * The daemon bearer token: the `STEWARD_DAEMON_TOKEN` override if set, else the token persisted in
- * agent.json. Resolved identically by the daemon (when binding) and the client (when attaching) so the
- * two always agree.
- */
-export function resolveDaemonToken(persisted: string): string {
-	return process.env[ENV_DAEMON_TOKEN]?.trim() || persisted;
-}
-
-// The fixed per-agent port is drawn from a high range that avoids the well-known/registered ports
-// where other services tend to live.
-const PORT_MIN = 20000;
-const PORT_MAX = 60000;
-
-/**
- * Pick a port for a new agent, skipping any in `used` (the ports already claimed by other agents).
- * A random pick in a high range, not a live bind: "free now" is not guaranteed to be "free at daemon
- * start", and the daemon fails loud on `EADDRINUSE` if the port is taken when it actually binds.
- */
-export function allocatePort(used: ReadonlySet<number> = new Set()): number {
-	for (let i = 0; i < 1000; i++) {
-		const port = PORT_MIN + Math.floor(Math.random() * (PORT_MAX - PORT_MIN + 1));
-		if (!used.has(port)) return port;
-	}
-	throw new Error("Could not allocate a free port for the agent.");
+/** The STEWARD_DAEMON_TOKEN override, if set — callers fall back to the agent's persisted token. */
+export function getDaemonToken(): string | undefined {
+	return process.env[ENV_DAEMON_TOKEN]?.trim();
 }
 
 // =============================================================================

@@ -15,10 +15,9 @@ import {
 	type Model,
 } from "@earendil-works/pi-ai";
 import type { AgentHarnessEvent, AgentMessage, SessionContext, SessionTreeEntry, ThinkingLevel } from "@opsyhq/agent";
-import { getDaemonHost, resolveDaemonToken } from "./config.ts";
+import { getDaemonHost, getDaemonToken } from "./config.ts";
 import type { ContextInfo, IntegrationInfo } from "./core/agent-runtime.ts";
 import { type AgentConfig, AgentSettingsManager } from "./core/agent-settings-manager.ts";
-import { isHealthy, requestDaemonShutdown, waitForHealth, waitForShutdown } from "./core/daemon-health.ts";
 import { THINKING_LEVELS } from "./core/defaults.ts";
 import type { ResourceSummary } from "./core/diagnostics.ts";
 import type {
@@ -201,12 +200,9 @@ export class Agent {
 	 * session (use `getSession(id)` / `getLatestSession()`).
 	 */
 	async connect(): Promise<void> {
-		// The agent's fixed port + token live in agent.json. Attach if the daemon is already healthy on
-		// that port; otherwise spawn a detached `daemon <name>` (the same command the OS service unit
-		// runs) and wait for it.
 		const { port, token: persisted } = AgentSettingsManager.create(this.name).config;
 		const base = `http://${getDaemonHost()}:${port}`;
-		const token = resolveDaemonToken(persisted);
+		const token = getDaemonToken() || persisted;
 		if (!(await isHealthy(base))) {
 			// The launch command goes through the running binary, since `steward` isn't on PATH in dev.
 			const [command, ...commandArgs] = daemonLaunchCommand(this.name);
@@ -291,17 +287,16 @@ export class Agent {
 	}
 
 	/**
-	 * Commit the deploy. The daemon flips the latch, registers the OS service unit, and creates a fresh
-	 * deployed session (returned). With a real backend the client then drives a stop-then-start handoff on
-	 * the agent's fixed port: shut the birth daemon down, wait for the port to free, start the supervised
-	 * unit's daemon (which rebinds the same port and resumes the deployed session), and reconnect. ~1s
-	 * socket gap; no state loss (the session is on disk). The caller opens + switches to the returned
-	 * session. The `none` backend has no supervisor, so the birth daemon stays put.
+	 * Commit the deploy. The daemon flips the latch, enables the OS unit, and creates a fresh deployed
+	 * session (returned). With a real backend the client then drives a stop-then-start handoff on the fixed
+	 * port: shut the birth daemon down, start the unit's daemon (same port, resumes the session), reconnect.
+	 * Brief socket gap, no state loss (session on disk). The `none` backend has no supervisor, so the birth
+	 * daemon stays put.
 	 */
 	async deploy(): Promise<DaemonSessionState> {
 		const { port, token: persisted } = AgentSettingsManager.create(this.name).config;
 		const base = `http://${getDaemonHost()}:${port}`;
-		const token = resolveDaemonToken(persisted);
+		const token = getDaemonToken() || persisted;
 		// Routed like create_session (agent-global, but posted to a session's /control): use the latest.
 		const [latest] = this.getAgentState().sessions;
 		if (!latest) throw new Error(`No session for agent "${this.name}".`);
@@ -364,7 +359,7 @@ export class Agent {
 		const store = AgentSettingsManager.get(this.name);
 		if (store) {
 			const base = `http://${getDaemonHost()}:${store.config.port}`;
-			await requestDaemonShutdown(base, resolveDaemonToken(store.config.token));
+			await requestDaemonShutdown(base, getDaemonToken() || store.config.token);
 		}
 
 		return AgentSettingsManager.delete(this.name);
@@ -373,14 +368,13 @@ export class Agent {
 	/**
 	 * Restart the agent's daemon so it picks up code changes (the in-process reload rebuilds only
 	 * resources, not the running binary). A supervised daemon (launchd/systemd unit) is bounced via the
-	 * service manager so its supervisor relaunches it; an unsupervised dev/birth daemon spawned by
-	 * `connect()` is SIGTERMed and respawned here. Resolves once the replacement daemon (a new pid) is
-	 * healthy; sessions resume from disk, so in-memory turn state is lost.
+	 * service manager; an unsupervised dev/birth daemon is asked to exit and respawned here. Resolves once
+	 * the replacement is healthy; sessions resume from disk, so in-memory turn state is lost.
 	 */
 	async restart(): Promise<void> {
 		const { port, token: persisted } = AgentSettingsManager.create(this.name).config;
 		const base = `http://${getDaemonHost()}:${port}`;
-		const token = resolveDaemonToken(persisted);
+		const token = getDaemonToken() || persisted;
 		const service = getServiceManager();
 
 		if (service.kind !== "none" && (await service.isRunning(this.name))) {
@@ -710,5 +704,61 @@ export class SessionHandle {
 
 	respondUi(id: string, answer: Record<string, unknown>): Promise<void> {
 		return this.agent.respondUi(this.sessionId, id, answer);
+	}
+}
+
+const HEALTH_TIMEOUT_MS = 15_000;
+const HEALTH_POLL_MS = 150;
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** `GET /health` (no auth) answers `{status:"ok"}` while the daemon at `base` is listening. */
+export async function isHealthy(base: string): Promise<boolean> {
+	try {
+		const response = await fetch(`${base}/health`, { signal: AbortSignal.timeout(1000) });
+		if (!response.ok) return false;
+		return ((await response.json()) as { status?: string }).status === "ok";
+	} catch {
+		return false;
+	}
+}
+
+/** Poll `/health` until the daemon at `base` is listening (or time out). */
+export async function waitForHealth(base: string): Promise<void> {
+	const deadline = Date.now() + HEALTH_TIMEOUT_MS;
+	while (Date.now() < deadline) {
+		if (await isHealthy(base)) return;
+		await sleep(HEALTH_POLL_MS);
+	}
+	throw new Error(`Daemon at ${base} did not become healthy within ${HEALTH_TIMEOUT_MS / 1000}s.`);
+}
+
+/** Poll `/health` until the daemon at `base` stops responding (or time out) — the port is then free. */
+export async function waitForShutdown(base: string): Promise<void> {
+	const deadline = Date.now() + HEALTH_TIMEOUT_MS;
+	while (Date.now() < deadline) {
+		if (!(await isHealthy(base))) return;
+		await sleep(HEALTH_POLL_MS);
+	}
+	throw new Error(`Daemon at ${base} did not shut down within ${HEALTH_TIMEOUT_MS / 1000}s.`);
+}
+
+/** Best-effort: ask a running daemon to self-exit. Session-scoped on the wire, so post it to any session. */
+export async function requestDaemonShutdown(base: string, token: string): Promise<void> {
+	try {
+		const list = await fetch(`${base}/sessions`, {
+			headers: { authorization: `Bearer ${token}` },
+			signal: AbortSignal.timeout(2000),
+		});
+		if (!list.ok) return;
+		const sessionId = ((await list.json()) as DaemonAgentState).sessions[0]?.sessionId;
+		if (!sessionId) return;
+		await fetch(`${base}/sessions/${sessionId}/control`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+			body: JSON.stringify({ type: "shutdown" }),
+			signal: AbortSignal.timeout(2000),
+		});
+	} catch {
+		// Best-effort: the daemon is already down or unreachable.
 	}
 }

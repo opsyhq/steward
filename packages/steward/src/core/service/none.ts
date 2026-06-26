@@ -6,9 +6,9 @@
  * a `shutdown` request to stop.
  */
 
-import { getDaemonHost, resolveDaemonToken } from "../../config.ts";
+import { isHealthy, requestDaemonShutdown } from "../../client.ts";
+import { getDaemonHost, getDaemonToken } from "../../config.ts";
 import { AgentSettingsManager } from "../agent-settings-manager.ts";
-import { isHealthy, requestDaemonShutdown } from "../daemon-health.ts";
 import type { ServiceManager } from "./service-manager.ts";
 
 export class NoneServiceManager implements ServiceManager {
@@ -31,7 +31,7 @@ export class NoneServiceManager implements ServiceManager {
 		if (!store) return;
 		void requestDaemonShutdown(
 			`http://${getDaemonHost()}:${store.config.port}`,
-			resolveDaemonToken(store.config.token),
+			getDaemonToken() || store.config.token,
 		);
 	}
 

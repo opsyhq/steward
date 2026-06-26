@@ -24,7 +24,7 @@ import type { AgentHarnessEvent } from "@opsyhq/agent";
 import { Hono } from "hono";
 import { bearerAuth } from "hono/bearer-auth";
 import { type SSEStreamingApi, streamSSE } from "hono/streaming";
-import { APP_NAME, getAgentDir, getDaemonHost, resolveDaemonToken } from "./config.ts";
+import { APP_NAME, getAgentDir, getDaemonHost, getDaemonToken } from "./config.ts";
 import { createAgentPluginManager } from "./core/agent-plugin-manager.ts";
 import { AgentRuntime, type AgentSession } from "./core/agent-runtime.ts";
 import { AgentSettingsManager } from "./core/agent-settings-manager.ts";
@@ -248,11 +248,9 @@ async function handleCommand(
 			await runtime.reload();
 			return ok(id, "reload");
 		case "deploy": {
-			// The human's single Yes. Flip the latch, register (enable) the OS service unit, and create a
-			// fresh deployed session — persisted to disk, so the supervised daemon (which resumes the
-			// most-recent session) picks up THIS fresh one. The client drives the handoff after this returns:
-			// it shuts this daemon down and starts the unit's daemon on the same fixed port. With the `none`
-			// backend there is no supervisor, so this daemon stays on the fresh session.
+			// The human's single Yes: flip the latch, enable the OS unit, and create a fresh deployed
+			// session (persisted, so the restarted daemon resumes it). The client drives the stop-then-start
+			// handoff on the fixed port; with the `none` backend this daemon just stays on the fresh session.
 			const name = runtime.config.name;
 			AgentSettingsManager.create(name).setAgentDeployed();
 			getServiceManager().install(name);
@@ -434,10 +432,9 @@ export async function runDaemon(name: string, opts: RunDaemonOptions = {}): Prom
 	}
 	const { runtime } = built;
 
-	// Fixed per-agent port from agent.json; `--port` overrides for debugging. The bearer token likewise
-	// comes from agent.json, unless STEWARD_DAEMON_TOKEN overrides it.
+	// Fixed per-agent port + token from agent.json; `--port` and STEWARD_DAEMON_TOKEN override.
 	const port = opts.port ?? store.config.port;
-	const token = resolveDaemonToken(store.config.token);
+	const token = getDaemonToken() || store.config.token;
 
 	let server: ServerType | undefined;
 	let shuttingDown = false;
