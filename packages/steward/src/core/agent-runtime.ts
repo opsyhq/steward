@@ -117,9 +117,28 @@ import {
 import { createMemoryTool } from "./tools/memory.ts";
 import { wrapToolDefinition } from "./tools/tool-definition-wrapper.ts";
 
+/**
+ * Placeholder model handed to the engine when the agent has none configured yet (fresh agent / logged
+ * out). The engine always holds a model; this one carries no auth, so the request-time auth check
+ * surfaces the clean "log in" error on the first turn. Mirrors the engine's own `DEFAULT_MODEL`.
+ */
+const UNKNOWN_MODEL: Model<Api> = {
+	id: "unknown",
+	name: "unknown",
+	api: "unknown",
+	provider: "unknown",
+	baseUrl: "",
+	reasoning: false,
+	input: [],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 0,
+	maxTokens: 0,
+};
+
 export interface AgentRuntimeOptions {
 	name: string;
-	model: Model<Api>;
+	/** The agent's configured model, or undefined when none is set yet (fresh agent / logged out). */
+	model?: Model<Api>;
 	authStorage: AuthStorage;
 	/**
 	 * Durable per-agent model registry (auth-filtered model list + provider registration).
@@ -379,8 +398,8 @@ export class AgentRuntime {
 	}
 
 	// Durable state the live sessions read off their runtime. configuredModel is agent.json's
-	// model (distinct from a session's resumed model).
-	get configuredModel(): Model<Api> {
+	// model (distinct from a session's resumed model), or undefined when none is set yet.
+	get configuredModel(): Model<Api> | undefined {
 		return this.options.model;
 	}
 	get modelRegistry(): ModelRegistry {
@@ -777,7 +796,8 @@ export class AgentRuntime {
 	 * runs against the new session's facade once it is wired and live.
 	 */
 	async createSession(options?: NewSessionOptions): Promise<AgentSession> {
-		const { name, model } = this.options;
+		const { name } = this.options;
+		const model = this.configuredModel ?? UNKNOWN_MODEL;
 		this._settingsManager.reload();
 		this._config = this._settingsManager.config;
 
@@ -822,7 +842,8 @@ export class AgentRuntime {
 			const live = this._sessions.get(id);
 			if (live) return live;
 		}
-		const { name, model } = this.options;
+		const { name } = this.options;
+		const model = this.configuredModel ?? UNKNOWN_MODEL;
 		this._settingsManager.reload();
 		this._config = this._settingsManager.config;
 
@@ -911,7 +932,15 @@ export class AgentRuntime {
 	): Promise<{ apiKey: string; headers?: Record<string, string> }> {
 		const auth = await this._modelRegistry.getApiKeyAndHeaders(model);
 		if (!auth.ok) throw new Error(auth.error);
-		if (!auth.apiKey) throw new Error(`No API key for "${model.provider}"`);
+		if (!auth.apiKey) {
+			// No configured model means the session is on the placeholder sentinel — point at the actual
+			// fix (log in, then pick a model) rather than the meaningless `No API key for "unknown"`.
+			throw new Error(
+				this.configuredModel
+					? `No API key for "${model.provider}". Run /login to authenticate.`
+					: "No model configured. Run /login to sign in, then /model to choose a model.",
+			);
+		}
 		return {
 			apiKey: auth.apiKey,
 			headers: mergeProviderAttributionHeaders(model, this._settingsManager, sessionId, auth.headers),
@@ -1075,7 +1104,13 @@ export class AgentRuntime {
 			tools: [...tooling.baseTools, ...tooling.extensionTools],
 			resources: toHarnessResources(this._skills, this._promptTemplates),
 			getApiKeyAndHeaders: (requestModel) => this.resolveRequestAuth(requestModel, args.metadata.id),
-			getCompactionSettings: () => this._settingsManager.getCompactionSettings(),
+			// No configured model → the session runs on the placeholder sentinel (contextWindow 0, no auth),
+			// which would make every turn trip the compaction threshold and then fail on auth. Disable
+			// auto-compaction until a real model is set inline.
+			getCompactionSettings: () => {
+				const settings = this._settingsManager.getCompactionSettings();
+				return this.configuredModel ? settings : { ...settings, enabled: false };
+			},
 		});
 		agentSession.attachHarness(harness, tooling);
 		agentSession.wireExtensionEvents();
@@ -1233,7 +1268,7 @@ export class AgentSession {
 	 * purpose?" that opens a forming agent's first chat) and return it so the caller can also render it.
 	 */
 	async seedAssistantMessage(text: string): Promise<AssistantMessage> {
-		const model = this.runtime.configuredModel;
+		const model = this.harness.getModel();
 		const message: AssistantMessage = {
 			role: "assistant",
 			content: [{ type: "text", text }],
