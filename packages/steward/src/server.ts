@@ -367,11 +367,11 @@ async function handleCommand(
 }
 
 /**
- * Resolve model/auth once and construct the `AgentRuntime` — the front half of the daemon runner.
- * Returns the unstarted `runtime`, or an `{ error }` for the model/auth failures that should print to
- * stderr and exit 1.
+ * Resolve the model and construct the (unstarted) `AgentRuntime` — the front half of the daemon runner.
+ * A missing/unauth'd model is not fatal: the runtime starts model-less and the request-time auth check
+ * surfaces the clean "log in" error on the first turn, so the daemon always comes up.
  */
-async function createAgentRuntime(name: string): Promise<{ runtime: AgentRuntime } | { error: string }> {
+async function createAgentRuntime(name: string): Promise<AgentRuntime> {
 	const store = AgentSettingsManager.create(name);
 
 	// Per-agent credentials override the shared store per provider: the agent tier
@@ -396,21 +396,17 @@ async function createAgentRuntime(name: string): Promise<{ runtime: AgentRuntime
 		defaultModelId,
 		modelRegistry,
 	});
-	if (!resolved.model) {
-		return { error: `No model available for agent "${name}". Log in with the steward CLI.` };
-	}
-	const model = resolved.model;
-
-	// Auth precedence (handled by the layered AuthStorage): agent tier → global tier, each runtime →
-	// auth.json (api key / OAuth) → env var. hasConfiguredAuth() doesn't refresh tokens — it just checks
-	// something exists across both tiers plus any models.json provider key. If it returns false, every
-	// credential source is absent, so the only actionable hint is to log in.
-	if (!modelRegistry.hasConfiguredAuth(model)) {
-		return { error: `No credentials found for provider "${model.provider}". Log in with the steward CLI.` };
-	}
-
-	const runtime = new AgentRuntime({ name, model, authStorage, modelRegistry, integrationAccounts, integrationStore });
-	return { runtime };
+	// No auth'd model is not fatal: the runtime starts model-less (the engine falls back to a concrete
+	// default so it always holds a model) and the request-time auth check surfaces the clean "log in"
+	// error on the first turn. Login then happens inline via /login + /model.
+	return new AgentRuntime({
+		name,
+		model: resolved.model,
+		authStorage,
+		modelRegistry,
+		integrationAccounts,
+		integrationStore,
+	});
 }
 
 export interface RunDaemonOptions {
@@ -432,12 +428,7 @@ export async function runDaemon(name: string, opts: RunDaemonOptions = {}): Prom
 		return 1;
 	}
 
-	const built = await createAgentRuntime(name);
-	if ("error" in built) {
-		process.stderr.write(`${built.error}\n`);
-		return 1;
-	}
-	const { runtime } = built;
+	const runtime = await createAgentRuntime(name);
 
 	// Fixed per-agent port + token from agent.json; `--port` and STEWARD_DAEMON_TOKEN override.
 	const port = opts.port ?? store.config.port;
