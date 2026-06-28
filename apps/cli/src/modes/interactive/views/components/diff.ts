@@ -1,5 +1,5 @@
 import * as Diff from "diff";
-import { theme } from "@opsyhq/steward";
+import { theme } from "@opsyhq/voli";
 
 /**
  * Parse diff line to extract prefix, line number, and content.

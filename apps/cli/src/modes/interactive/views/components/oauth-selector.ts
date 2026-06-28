@@ -3,11 +3,11 @@
  * (provider, auth method) option with a live status indicator (configured / env / unconfigured).
  *
  * Ported from the coding-agent's OAuthSelectorComponent so onboarding mirrors that flow rather than
- * the dashboard's method-first command bar. Reuses steward's shared primitives (AuthStorage,
+ * the dashboard's method-first command bar. Reuses voli's shared primitives (AuthStorage,
  * DynamicBorder, theme) — nothing is imported from the coding-agent package.
  */
 
-import { type AuthStatus, AuthStorage, DynamicBorder, theme } from "@opsyhq/steward";
+import { type AuthStatus, AuthStorage, DynamicBorder, theme } from "@opsyhq/voli";
 import { Container, type Focusable, fuzzyFilter, getKeybindings, Input, Spacer, TruncatedText } from "@opsyhq/tui";
 
 export type AuthSelectorProvider = {

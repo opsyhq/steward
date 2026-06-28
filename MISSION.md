@@ -1,8 +1,8 @@
 # Mission
 
-Opsy builds persistent, purposeful AI agents.
+Voli builds persistent, purposeful AI agents.
 
-An Opsy agent is not a chat session. It is a durable worker with a purpose, memory, tools, workspace, and the ability to act proactively on behalf of a human or organization.
+An Voli agent is not a chat session. It is a durable worker with a purpose, memory, tools, workspace, and the ability to act proactively on behalf of a human or organization.
 
 The agent begins by asking: **What is my purpose?**
 
@@ -36,7 +36,7 @@ That purpose becomes the organizing principle for the agent's life. It shapes wh
 
 ## Product Direction
 
-Opsy should make it easy to create agents that become more specialized and useful over time.
+Voli should make it easy to create agents that become more specialized and useful over time.
 
 Examples:
 

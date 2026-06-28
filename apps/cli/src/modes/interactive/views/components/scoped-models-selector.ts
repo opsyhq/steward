@@ -1,5 +1,5 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { DynamicBorder, keyText, theme } from "@opsyhq/steward";
+import { DynamicBorder, keyText, theme } from "@opsyhq/voli";
 import {
 	Container,
 	type Focusable,

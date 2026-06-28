@@ -4,7 +4,7 @@ import {
 	keyHint,
 	type Theme,
 	type ToolRenderResultOptions,
-} from "@opsyhq/steward";
+} from "@opsyhq/voli";
 import { Container, Text } from "@opsyhq/tui";
 import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "./render-utils.ts";
 import type { ToolRenderer } from "./index.ts";

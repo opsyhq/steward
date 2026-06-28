@@ -1,5 +1,5 @@
 import { type Api, type Model, modelsAreEqual } from "@earendil-works/pi-ai";
-import { DynamicBorder, keyHint, theme } from "@opsyhq/steward";
+import { DynamicBorder, keyHint, theme } from "@opsyhq/voli";
 import { Container, type Focusable, fuzzyFilter, getKeybindings, Input, Spacer, Text, type TUI } from "@opsyhq/tui";
 
 interface ModelItem {

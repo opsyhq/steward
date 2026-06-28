@@ -5,7 +5,7 @@ import {
 	keyHint,
 	type Theme,
 	type ToolRenderResultOptions,
-} from "@opsyhq/steward";
+} from "@opsyhq/voli";
 import { Text } from "@opsyhq/tui";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
 import type { ToolRenderer } from "./index.ts";

@@ -5,7 +5,7 @@ import {
 	keyHint,
 	theme,
 	type ToolRenderResultOptions,
-} from "@opsyhq/steward";
+} from "@opsyhq/voli";
 import { Container, Text, truncateToWidth } from "@opsyhq/tui";
 import { truncateToVisualLines } from "../modes/interactive/views/components/visual-truncate.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
