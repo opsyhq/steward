@@ -102,7 +102,7 @@ export class OnboardingView extends Container implements AppView {
       "Connect a model provider so your agents can think. (~1 minute)",
       ["Get started", "Skip setup"],
       (option) => {
-        if (option === "Get started") this.showProviderList();
+        if (option === "Get started") this.showLoginProviderSelector();
         else this.finish();
       },
       () => this.finish(),
@@ -111,7 +111,7 @@ export class OnboardingView extends Container implements AppView {
   }
 
   /** The flat (provider, auth method) list — oauth subscriptions plus api-key providers. */
-  private getProviderOptions(): AuthSelectorProvider[] {
+  private getLoginProviderOptions(): AuthSelectorProvider[] {
     const oauthProviders = this.auth.getOAuthProviders();
     const oauthIds = new Set(oauthProviders.map((p) => p.id));
     const options: AuthSelectorProvider[] = oauthProviders.map((p) => ({ id: p.id, name: p.name, authType: "oauth" }));
@@ -123,8 +123,8 @@ export class OnboardingView extends Container implements AppView {
   }
 
   /** Step 2: pick a provider + auth method from one searchable list. */
-  private showProviderList(): void {
-    const options = this.getProviderOptions();
+  private showLoginProviderSelector(): void {
+    const options = this.getLoginProviderOptions();
     if (options.length === 0) {
       this.showStatus("No providers available.");
       return;
@@ -136,8 +136,8 @@ export class OnboardingView extends Container implements AppView {
       (providerId) => {
         const option = options.find((o) => o.id === providerId);
         if (!option) return;
-        if (option.authType === "oauth") void this.runOAuthLogin(option);
-        else void this.runApiKeyLogin(option);
+        if (option.authType === "oauth") void this.showLoginDialog(option.id, option.name);
+        else void this.showApiKeyLoginDialog(option.id, option.name);
       },
       () => this.showWelcome(),
     );
@@ -145,17 +145,17 @@ export class OnboardingView extends Container implements AppView {
   }
 
   /** Step 3a: subscription/OAuth login, driven through the login dialog. */
-  private async runOAuthLogin(option: AuthSelectorProvider): Promise<void> {
-    const dialog = new LoginDialogComponent(this.ctx.tui, option.id, () => {}, option.name);
+  private async showLoginDialog(providerId: string, providerName: string): Promise<void> {
+    const dialog = new LoginDialogComponent(this.ctx.tui, providerId, () => {}, providerName);
     this.setActive(dialog);
     try {
-      await this.auth.login(option.id, {
+      await this.auth.login(providerId, {
         onAuth: (info) => dialog.showAuth(info.url, info.instructions),
         onDeviceCode: (info) => dialog.showDeviceCode(info),
         onPrompt: (prompt) => dialog.showPrompt(prompt.message, prompt.placeholder),
         onProgress: (message) => dialog.showProgress(message),
         onManualCodeInput: () => dialog.showManualInput("Paste the redirect URL or code, or finish in your browser:"),
-        onSelect: (prompt) => this.showLoginSelect(dialog, prompt),
+        onSelect: (prompt) => this.showOAuthLoginSelect(dialog, prompt),
         signal: dialog.signal,
       });
       this.registry.refresh();
@@ -165,30 +165,30 @@ export class OnboardingView extends Container implements AppView {
       if (!dialog.signal.aborted) {
         this.showStatus(theme.fg("warning", error instanceof Error ? error.message : String(error)));
       }
-      this.showProviderList();
+      this.showLoginProviderSelector();
     }
   }
 
   /** Step 3b: API-key login, prompting inside the login dialog. */
-  private async runApiKeyLogin(option: AuthSelectorProvider): Promise<void> {
-    const dialog = new LoginDialogComponent(this.ctx.tui, option.id, () => {}, option.name);
+  private async showApiKeyLoginDialog(providerId: string, providerName: string): Promise<void> {
+    const dialog = new LoginDialogComponent(this.ctx.tui, providerId, () => {}, providerName);
     this.setActive(dialog);
     try {
-      const key = (await dialog.showPrompt(`Enter API key for ${option.name}:`)).trim();
+      const key = (await dialog.showPrompt(`Enter API key for ${providerName}:`)).trim();
       if (!key) throw new Error("API key cannot be empty.");
-      this.auth.set(option.id, { type: "api_key", key });
+      this.auth.set(providerId, { type: "api_key", key });
       this.registry.refresh();
       this.showModelStep();
     } catch (error) {
       if (!dialog.signal.aborted) {
         this.showStatus(theme.fg("warning", error instanceof Error ? error.message : String(error)));
       }
-      this.showProviderList();
+      this.showLoginProviderSelector();
     }
   }
 
   /** An OAuth provider asked us to pick one of several options mid-login; swap to a selector and back. */
-  private showLoginSelect(dialog: LoginDialogComponent, prompt: OAuthSelectPrompt): Promise<string | undefined> {
+  private showOAuthLoginSelect(dialog: LoginDialogComponent, prompt: OAuthSelectPrompt): Promise<string | undefined> {
     return new Promise((resolve) => {
       const selector = new ExtensionSelectorComponent(
         prompt.message,
@@ -211,7 +211,7 @@ export class OnboardingView extends Container implements AppView {
     const available = this.registry.getAvailable();
     if (available.length === 0) {
       this.showStatus("No models available — choose another provider.");
-      this.showProviderList();
+      this.showLoginProviderSelector();
       return;
     }
     const existing = this.defaultModel(available);
