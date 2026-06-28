@@ -10,8 +10,9 @@
 		"dist"
 	],
 	"scripts": {
-		"clean": "shx rm -rf dist",
+		"clean": "shx rm -rf dist bundle",
 		"build": "tsgo -p tsconfig.build.json && shx chmod +x dist/cli.js",
+		"build:bundle": "node scripts/bundle.mjs",
 		"typecheck": "tsgo -p tsconfig.build.json --noEmit",
 		"test": "vitest --run --passWithNoTests"
 	},
@@ -26,6 +27,7 @@
 	"devDependencies": {
 		"@types/diff": "7.0.2",
 		"@types/node": "24.12.4",
+		"esbuild": "0.27.7",
 		"shx": "0.4.0",
 		"typescript": "5.9.3",
 		"vitest": "3.2.4"

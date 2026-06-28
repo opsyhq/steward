@@ -61,6 +61,15 @@ export const VERSION: string = pkg.version || "0.0.0";
 export const isBunBinary =
 	import.meta.url.includes("$bunfs") || import.meta.url.includes("~BUN") || import.meta.url.includes("%7EBUN");
 
+/**
+ * Detect if we're running from the single-file esbuild bundle (the npm `wolli`
+ * package). Baked in via esbuild `define` at bundle time. Like `isBunBinary`,
+ * this makes the extension/integration loaders use jiti `virtualModules` (the
+ * statically-bundled module objects) instead of resolving `@opsyhq/*` from
+ * node_modules, which don't exist as separate packages inside the bundle.
+ */
+export const isBundled = process.env.WOLLI_BUNDLED === "1";
+
 // e.g., WOLLI_HOME
 export const ENV_HOME = `${APP_NAME.toUpperCase()}_HOME`;
 

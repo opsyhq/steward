@@ -1,6 +1,7 @@
 node_modules/
 dist/
 packages/*/dist/
+apps/cli/bundle/
 *.tsbuildinfo
 *.log
 *.cpuprofile

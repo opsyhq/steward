@@ -8,7 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createJiti } from "jiti/static";
-import { isBunBinary } from "../../config.ts";
+import { isBunBinary, isBundled } from "../../config.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { getAliases, VIRTUAL_MODULES } from "../extensions/loader.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
@@ -84,7 +84,7 @@ function createIntegrationAPI(integration: Integration, runtime: IntegrationRunt
 async function loadIntegrationModule(integrationPath: string): Promise<IntegrationFactory | undefined> {
 	const jiti = createJiti(import.meta.url, {
 		moduleCache: false,
-		...(isBunBinary ? { virtualModules: VIRTUAL_MODULES, tryNative: false } : { alias: getAliases() }),
+		...(isBunBinary || isBundled ? { virtualModules: VIRTUAL_MODULES, tryNative: false } : { alias: getAliases() }),
 	});
 
 	const realPath = fs.existsSync(integrationPath) ? fs.realpathSync(integrationPath) : integrationPath;

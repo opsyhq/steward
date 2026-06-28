@@ -44,7 +44,10 @@ function pathOrNull(file: PathOrFileDescriptor): string | null {
 
 function getFallbackWasmPaths(): string[] {
 	const execDir = path.dirname(process.execPath);
+	// In the esbuild bundle the wasm ships next to cli.js (this module's dir).
+	const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 	return [
+		path.join(moduleDir, WASM_FILENAME),
 		path.join(execDir, WASM_FILENAME),
 		path.join(execDir, "photon", WASM_FILENAME),
 		path.join(process.cwd(), WASM_FILENAME),
