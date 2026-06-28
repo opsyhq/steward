@@ -36,12 +36,12 @@ importers:
       '@opsyhq/agent':
         specifier: workspace:*
         version: link:../../packages/agent
-      '@opsyhq/steward':
-        specifier: workspace:*
-        version: link:../../packages/steward
       '@opsyhq/tui':
         specifier: workspace:*
         version: link:../../packages/tui
+      '@opsyhq/voli':
+        specifier: workspace:*
+        version: link:../../packages/voli
       chalk:
         specifier: 5.6.2
         version: 5.6.2
@@ -179,7 +179,23 @@ importers:
         specifier: 0.3.9
         version: 0.3.9
 
-  packages/steward:
+  packages/tui:
+    dependencies:
+      get-east-asian-width:
+        specifier: 1.6.0
+        version: 1.6.0
+      marked:
+        specifier: 15.0.12
+        version: 15.0.12
+    devDependencies:
+      '@xterm/headless':
+        specifier: 5.5.0
+        version: 5.5.0
+      chalk:
+        specifier: 5.6.2
+        version: 5.6.2
+
+  packages/voli:
     dependencies:
       '@anthropic-ai/sandbox-runtime':
         specifier: 0.0.56
@@ -275,22 +291,6 @@ importers:
       vitest:
         specifier: 3.2.4
         version: 3.2.4(@types/node@24.12.4)(jiti@2.7.0)(yaml@2.9.0)
-
-  packages/tui:
-    dependencies:
-      get-east-asian-width:
-        specifier: 1.6.0
-        version: 1.6.0
-      marked:
-        specifier: 15.0.12
-        version: 15.0.12
-    devDependencies:
-      '@xterm/headless':
-        specifier: 5.5.0
-        version: 5.5.0
-      chalk:
-        specifier: 5.6.2
-        version: 5.6.2
 
 packages:
 

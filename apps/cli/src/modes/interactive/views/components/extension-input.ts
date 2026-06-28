@@ -3,7 +3,7 @@
  */
 
 import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@opsyhq/tui";
-import { DynamicBorder, keyHint, theme } from "@opsyhq/steward";
+import { DynamicBorder, keyHint, theme } from "@opsyhq/voli";
 import { CountdownTimer } from "./countdown-timer.ts";
 
 export interface ExtensionInputOptions {

@@ -17,10 +17,10 @@ import {
 	Text,
 	type TUI,
 } from "@opsyhq/tui";
-import type { KeybindingsManager } from "@opsyhq/steward";
-import { getEditorTheme, theme } from "@opsyhq/steward";
-import { DynamicBorder } from "@opsyhq/steward";
-import { keyHint } from "@opsyhq/steward";
+import type { KeybindingsManager } from "@opsyhq/voli";
+import { getEditorTheme, theme } from "@opsyhq/voli";
+import { DynamicBorder } from "@opsyhq/voli";
+import { keyHint } from "@opsyhq/voli";
 
 export class ExtensionEditorComponent extends Container implements Focusable {
 	private editor: Editor;
@@ -109,14 +109,14 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 		}
 
 		const currentText = this.editor.getText();
-		const tmpFile = path.join(os.tmpdir(), `steward-extension-editor-${Date.now()}.md`);
+		const tmpFile = path.join(os.tmpdir(), `voli-extension-editor-${Date.now()}.md`);
 
 		try {
 			fs.writeFileSync(tmpFile, currentText, "utf-8");
 			this.tui.stop();
 
 			const [editor, ...editorArgs] = editorCmd.split(" ");
-			process.stdout.write(`Launching external editor: ${editorCmd}\nSteward will resume when the editor exits.\n`);
+			process.stdout.write(`Launching external editor: ${editorCmd}\nVoli will resume when the editor exits.\n`);
 
 			// Do not use spawnSync here. On Windows, synchronous child_process calls can keep
 			// Node/libuv's console input read active after tui.stop() pauses stdin, racing

@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@opsyhq/agent";
-import { DynamicBorder, getSelectListTheme } from "@opsyhq/steward";
+import { DynamicBorder, getSelectListTheme } from "@opsyhq/voli";
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@opsyhq/tui";
 
 const THINKING_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {

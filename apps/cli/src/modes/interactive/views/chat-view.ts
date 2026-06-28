@@ -73,7 +73,7 @@ import {
 	theme,
 	type TruncationResult,
 	type WorkingIndicatorOptions,
-} from "@opsyhq/steward";
+} from "@opsyhq/voli";
 import { FooterDataProvider } from "../../../footer-data-provider.ts";
 import { KeybindingsManager } from "../../../keybindings-manager.ts";
 import type { AppView, ViewContext } from "../app.ts";
@@ -168,7 +168,7 @@ export class ChatView extends Container implements AppView {
 	private loader!: Loader;
 	private readonly markdownTheme: MarkdownTheme;
 	// Extension UI chrome. The header/footer containers hold extension-supplied components
-	// (empty otherwise — steward has no built-in header/footer rows); the widget containers
+	// (empty otherwise — voli has no built-in header/footer rows); the widget containers
 	// frame the editor above and below. `footerDataProvider` backs custom footers and the
 	// `setStatus`/git-branch data they read.
 	private readonly headerContainer: Container;
@@ -562,7 +562,7 @@ export class ChatView extends Container implements AppView {
 			await this.handleReloadCommand();
 			return;
 		}
-		// `/quit` — exit steward (same as Ctrl+C).
+		// `/quit` — exit voli (same as Ctrl+C).
 		if (trimmed === "/quit") {
 			this.editor.setText("");
 			this.ctx.quit();
@@ -1470,7 +1470,7 @@ export class ChatView extends Container implements AppView {
 		}
 	}
 
-	/** Install a custom footer component, or clear it (steward has no built-in footer row). */
+	/** Install a custom footer component, or clear it (voli has no built-in footer row). */
 	private setExtensionFooter(
 		factory:
 			| ((tui: TUI, thm: Theme, footerData: ReadonlyFooterDataProvider) => Component & { dispose?(): void })
@@ -1489,7 +1489,7 @@ export class ChatView extends Container implements AppView {
 		this.ui.requestRender();
 	}
 
-	/** Install a custom header component, or clear it (steward's built-in header is in the chat log). */
+	/** Install a custom header component, or clear it (voli's built-in header is in the chat log). */
 	private setExtensionHeader(factory: ((tui: TUI, thm: Theme) => Component & { dispose?(): void }) | undefined): void {
 		if (this.customHeader?.dispose) {
 			this.customHeader.dispose();
@@ -1842,7 +1842,7 @@ export class ChatView extends Container implements AppView {
 				break;
 			}
 			case "compaction_end": {
-				// Restore the editor's prior Escape handler (undefined by default in steward).
+				// Restore the editor's prior Escape handler (undefined by default in voli).
 				this.defaultEditor.onEscape = this.autoCompactionEscapeHandler;
 				this.autoCompactionEscapeHandler = undefined;
 				if (this.autoCompactionLoader) {
@@ -1860,7 +1860,7 @@ export class ChatView extends Container implements AppView {
 					// Repaint the compacted context, then append the summary at the boundary so the
 					// [compaction] marker lands where the user is, not just at messages[0] off-screen
 					// above the kept window. Mirrors coding-agent's compaction_end result branch; the
-					// rebuild is awaited first because steward's runs against the daemon.
+					// rebuild is awaited first because voli's runs against the daemon.
 					const result = event.result;
 					void this.rebuildChatFromMessages().then(() => {
 						this.addMessageToChat(

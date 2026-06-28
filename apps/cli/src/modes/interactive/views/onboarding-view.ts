@@ -5,7 +5,7 @@
  * drops into the dashboard. Esc/Ctrl+C steps back, or skips out from the welcome screen.
  *
  * The provider list and login dialog mirror the coding-agent's OAuthSelectorComponent /
- * LoginDialogComponent, reused here against steward's own AuthStorage + ModelRegistry.
+ * LoginDialogComponent, reused here against voli's own AuthStorage + ModelRegistry.
  */
 
 import type { Api, Model, OAuthSelectPrompt } from "@earendil-works/pi-ai";
@@ -22,7 +22,7 @@ import {
   setSharedDefaultModel,
   theme,
   VERSION,
-} from "@opsyhq/steward";
+} from "@opsyhq/voli";
 import { type Component, Container, Text } from "@opsyhq/tui";
 import type { AppView, ViewContext } from "../app.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";

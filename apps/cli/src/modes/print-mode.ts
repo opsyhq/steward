@@ -8,7 +8,7 @@
  */
 
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { SessionHandle } from "@opsyhq/steward";
+import type { SessionHandle } from "@opsyhq/voli";
 
 export async function runPrintMode(session: SessionHandle, message: string): Promise<number> {
 	let exitCode = 0;

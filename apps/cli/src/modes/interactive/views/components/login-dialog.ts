@@ -1,12 +1,12 @@
 /**
  * Login dialog: owns the full provider login flow — OAuth browser/device-code, manual paste,
  * API-key prompt, and progress — in one cohesive content area. Ported from the coding-agent's
- * LoginDialogComponent, adapted to import the shared primitives from @opsyhq/steward and to take the
+ * LoginDialogComponent, adapted to import the shared primitives from @opsyhq/voli and to take the
  * provider display name directly (the caller already has it), so it needs no provider registry.
  */
 
 import type { OAuthDeviceCodeInfo } from "@earendil-works/pi-ai";
-import { DynamicBorder, keyHint, openBrowser, theme } from "@opsyhq/steward";
+import { DynamicBorder, keyHint, openBrowser, theme } from "@opsyhq/voli";
 import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@opsyhq/tui";
 
 /** Login dialog component - replaces the host while a provider login is in progress. */

@@ -4,16 +4,16 @@
  * daemon binary itself.
  */
 
-import { APP_NAME, Steward } from "@opsyhq/steward";
+import { APP_NAME, Voli } from "@opsyhq/voli";
 
 export async function runRestart(positionals: string[]): Promise<number> {
-	const steward = new Steward();
+	const voli = new Voli();
 	const name = positionals[0];
 	if (!name || positionals.length > 1) {
 		process.stderr.write(`Usage: ${APP_NAME} restart <name>\n`);
 		return 1;
 	}
-	const agent = steward.get(name);
+	const agent = voli.get(name);
 	if (!agent) {
 		process.stderr.write(`Unknown agent "${name}".\n`);
 		return 1;

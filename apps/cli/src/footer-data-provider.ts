@@ -6,7 +6,7 @@ import {
 	FS_WATCH_RETRY_DELAY_MS,
 	type ReadonlyFooterDataProvider,
 	watchWithErrorHandler,
-} from "@opsyhq/steward";
+} from "@opsyhq/voli";
 
 type GitPaths = {
 	repoDir: string;

@@ -1,7 +1,7 @@
 import { CancellableLoader, Container, Loader, Spacer, Text, type TUI } from "@opsyhq/tui";
-import type { Theme } from "@opsyhq/steward";
-import { DynamicBorder } from "@opsyhq/steward";
-import { keyHint } from "@opsyhq/steward";
+import type { Theme } from "@opsyhq/voli";
+import { DynamicBorder } from "@opsyhq/voli";
+import { keyHint } from "@opsyhq/voli";
 
 /** Loader wrapped with borders for extension UI */
 export class BorderedLoader extends Container {
