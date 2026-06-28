@@ -923,7 +923,7 @@ export class ChatView extends Container implements AppView {
 	/**
 	 * `/login` — pick an auth method, then a provider, then run the login through the shared login
 	 * dialog. The daemon drives the OAuth/api-key flow over the login seam (`login_ui_request` frames
-	 * rendered by `renderLoginRequest`); on success the new provider's models become selectable via `/model`.
+	 * dispatched by `dispatchLoginRequest`); on success the new provider's models become selectable via `/model`.
 	 */
 	private async handleLoginCommand(): Promise<void> {
 		const subscriptionLabel = "Use a subscription";
@@ -974,7 +974,7 @@ export class ChatView extends Container implements AppView {
 
 	/**
 	 * Run a provider login over the daemon login seam: swap a shared `LoginDialogComponent` into the
-	 * editor, bind `session.onLoginRequest` to render each daemon frame into it (answering the awaited
+	 * editor, bind `session.onLoginRequest` to dispatch each daemon frame into it (answering the awaited
 	 * frames via `respondLogin`), then `await session.login(...)`. The browser opens client-side (the
 	 * dialog's show* methods call it) and credentials are written daemon-side only. Esc cancels the dialog
 	 * → `loginCancel()` aborts the daemon flow; the handler is cleared and the editor restored on completion.
@@ -989,7 +989,7 @@ export class ChatView extends Container implements AppView {
 			},
 			provider.name,
 		);
-		this.session.onLoginRequest = (req) => this.renderLoginRequest(dialog, req);
+		this.session.onLoginRequest = (req) => this.dispatchLoginRequest(dialog, req);
 
 		this.editorContainer.clear();
 		this.editorContainer.addChild(dialog);
@@ -1011,8 +1011,13 @@ export class ChatView extends Container implements AppView {
 		}
 	}
 
-	/** Render one daemon login frame into the dialog; answer the awaited frames via `respondLogin`. */
-	private renderLoginRequest(dialog: LoginDialogComponent, req: LoginUIRequest): void {
+	/**
+	 * Client half of the login round-trip: a daemon `login_ui_request` arrives over SSE (the login-seam
+	 * sibling of `dispatchUiRequest`). The fire-and-forget frames (`auth`/`deviceCode`/`progress`) update
+	 * the dialog; the awaited frames (`prompt`/`manualInput`/`select`) are shown locally and the answer is
+	 * POSTed back via `respondLogin`, resolving the parked daemon-side promise.
+	 */
+	private dispatchLoginRequest(dialog: LoginDialogComponent, req: LoginUIRequest): void {
 		switch (req.method) {
 			case "auth":
 				dialog.showAuth(req.url, req.instructions);
