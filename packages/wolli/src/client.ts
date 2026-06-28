@@ -344,16 +344,14 @@ export class Agent {
 		// Routed like create_session (agent-global, but posted to a session's /control): use the latest.
 		const [latest] = this.getAgentState().sessions;
 		if (!latest) throw new Error(`No session for agent "${this.name}".`);
-		// Note when the birth daemon booted, so the handoff below waits for its replacement rather than
-		// the birth daemon still answering probes over a lingering keep-alive socket.
+		// Birth daemon's boot time, so the handoff waits for its replacement (see waitForRestart).
 		const birthStartedAt = (await getDaemonInfo(base))?.startedAt ?? null;
 		const snap = await this.send<DaemonSessionState>(latest.sessionId, { type: "deploy" });
 
 		if (getServiceManager().kind === "none") return snap;
 
-		// Stop the birth daemon and wait for the fixed port to free, then start the supervised unit's
-		// daemon on that same port and wait until the replacement is serving — otherwise the reconnect
-		// below races the port handoff and fails with "fetch failed".
+		// Stop the birth daemon, wait for the fixed port to free, then start the supervised unit's daemon
+		// on it and wait for that replacement before reconnecting.
 		await requestDaemonShutdown(base, token);
 		await waitForShutdown(base);
 		getServiceManager().start(this.name);
@@ -424,8 +422,7 @@ export class Agent {
 		const base = `http://${getDaemonHost()}:${port}`;
 		const token = getDaemonToken() || persisted;
 		const service = getServiceManager();
-		// Note when the current daemon booted, so we wait for its replacement (not this one answering a
-		// probe over a lingering keep-alive socket) once the bounce/respawn lands.
+		// Current daemon's boot time, so we wait for its replacement after the bounce (see waitForRestart).
 		const previousStartedAt = (await getDaemonInfo(base))?.startedAt ?? null;
 
 		if (service.kind !== "none" && (await service.isRunning(this.name))) {
@@ -843,10 +840,9 @@ export async function waitForShutdown(base: string): Promise<void> {
 }
 
 /**
- * Poll `/health` until the daemon at `base` reports a `startedAt` other than `since` — i.e. it has
- * actually been replaced, not the old one still answering. Plain `waitForHealth` is fooled here: undici
- * keep-alive can answer a probe from the old, still-exiting daemon over a pooled socket before the
- * replacement has bound the reused port, so the reconnect then races into the gap and "fetch failed"s.
+ * Poll `/health` until `base` reports a `startedAt` other than `since` — a real replacement, not the old
+ * daemon still answering over a keep-alive socket before its replacement has bound the reused port (which
+ * would let the caller's reconnect race into the port-handoff gap and "fetch failed").
  */
 export async function waitForRestart(base: string, since: string | null): Promise<void> {
 	const deadline = Date.now() + HEALTH_TIMEOUT_MS;
