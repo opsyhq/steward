@@ -2,7 +2,7 @@
 
 # Wolli
 
-**Build persistent, purposeful AI agents.**
+**Create purposeful, self-extending AI agents.**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![npm](https://img.shields.io/npm/v/wolli.svg)](https://www.npmjs.com/package/wolli)
@@ -38,7 +38,7 @@ state live under `~/.wolli`.
 - **Purpose-built.** You state the agent's purpose at birth. It decides what the
   agent stores, when it speaks up, and what it does unattended.
 - **Self-extending.** The agent builds itself out for its purpose. It curates its
-  own memory and authors and installs its own skills, tools, and extensions; they
+  own memory and authors and installs its own skills, tools, extensions and integrations; they
   live in its home and load on reload. The agent grows more capable at its job
   instead of staying a fixed tool.
 - **Persistent.** Sessions are an append-only JSONL tree, the agent's lifetime
@@ -54,7 +54,7 @@ state live under `~/.wolli`.
   | `USER.md` | Facts about its human. |
 
 - **Always on, locally.** A per-agent daemon supervised by launchd (macOS) or
-  systemd (linux) runs the agent on schedules and events while your machine is on.
+  systemd (Linux) runs the agent on schedules and events while your machine is on.
 - **Sandboxed.** The agent runs in a sandbox by default: `srt` (Apple Seatbelt /
   bubblewrap), or optional Docker. Reaching your real machine is an explicit,
   approval-gated escalation.
@@ -76,6 +76,7 @@ removes them with it:
 
 | Type | What it adds |
 | --- | --- |
+| **Integrations** | TypeScript modules: tools, commands, events, UI. |
 | **Extensions** | TypeScript modules: tools, commands, events, UI. |
 | **Skills** | The Agent Skills standard. |
 | **Prompt templates** | `/name` slash commands. |
