@@ -102,7 +102,6 @@ Two integrations ship bundled: **Telegram** (bidirectional chat) and a
 
 Full documentation is in [`packages/wolli/docs`](packages/wolli/docs/index.md):
 extensions, skills, prompt templates, themes, integrations, plugins, and the SDK.
-The integration/extension split is covered in [INTEGRATION.md](INTEGRATION.md).
 
 ## Roadmap
 

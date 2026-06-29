@@ -5,7 +5,7 @@ and testing of extensions and integrations, is Planned right now; everything
 above it is Proposed. This is direction, not a dated commitment. What ships lives
 in the [README](README.md) and is described there in present tense.
 
-### 1. Logging and log retrieval (Logger)
+### Logging and log retrieval (Logger)
 
 Status: Proposed
 
@@ -20,7 +20,7 @@ Remaining:
 - Structured capture from extensions and integrations, keyed so a single run can be reconstructed.
 - A query surface (tool + CLI) to fetch and filter logs while debugging an extension or integration.
 
-### 2. Agent as a versioned git folder
+### Agent as a versioned git folder
 
 Status: Proposed
 
@@ -35,7 +35,7 @@ Remaining:
 - Git versioning and transport over the agent home so human and agent co-edits land as reviewable commits with history.
 - npm-style distribution of plugins from a registry, replacing manual folder copy.
 
-### 3. Workflows as first-class routing
+### Workflows as first-class routing
 
 Status: Proposed
 
@@ -51,7 +51,7 @@ Remaining:
 - Lift the channel-aware routing logic currently embedded in extensions into a default routing workflow that is itself first-class.
 - Support agent-authored workflows.
 
-### 4. Database primitive for agents
+### Database primitive for agents
 
 Status: Proposed
 
@@ -64,7 +64,7 @@ Remaining:
 
 - A general-purpose, durable structured-data store with a stable tool surface that agents can read and write directly.
 
-### 5. UI primitives for agents
+### UI primitives for agents
 
 Status: Proposed
 
@@ -78,7 +78,7 @@ Remaining:
 - "Working UI": a view of what the agent is doing, driven purely by agent events and reconstructed independently by each client.
 - Declarative, persistable components the agent can emit (e.g. "2000 kcal today") that a client either supports and renders or ignores; ignored components are not fed back into agent context.
 
-### 6. First-class webhook / proxy for integrations
+### First-class webhook / proxy for integrations
 
 Status: Proposed
 
@@ -95,7 +95,7 @@ Notes:
 
 - Generic inbound HTTP, GitHub, and WhatsApp integrations depend on this surface.
 
-### 7. Integration Hardening
+### Integration Hardening
 
 Status: Proposed
 
@@ -105,7 +105,7 @@ Remaining:
 - Run integrations as short-lived, sandboxed invocations instead of long-running processes: each handler executes as a workflow step with limited access, closer to a serverless function than a daemon.
 - Remodel the scheduler integration to be event-triggered rather than a long-running listener.
 
-### 7. Durable agents
+### Durable agents
 
 Status: Proposed
 
@@ -118,19 +118,19 @@ Remaining:
 
 - Deterministic survival of in-flight runtime state across restart and migration, not just resumption of the conversation transcript.
 
-### 8. Durable workflows
+### Durable workflows
 
 Status: Proposed
 
 Done:
 
-- No direct scaffolding yet; depends on item 3 (workflows as first-class routing). The session tree's deterministic replay is the model to follow.
+- No direct scaffolding yet; depends on workflows as first-class routing. The session tree's deterministic replay is the model to follow.
 
 Remaining:
 
 - Workflow runs survive restarts and resume deterministically from where they stopped.
 
-### 9. Durable integrations
+### Durable integrations
 
 Status: Proposed
 
@@ -143,7 +143,7 @@ Remaining:
 
 - Integration listeners and their state survive restarts and resume deterministically.
 
-### 10. Build-time compilation and testing of extensions and integrations
+### Build-time compilation and testing of extensions and integrations
 
 Status: Planned
 
