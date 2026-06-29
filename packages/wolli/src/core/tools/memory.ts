@@ -97,7 +97,7 @@ export function createMemoryTool(name: string): AgentTool<typeof memorySchema, M
 		name: "memory",
 		label: "Memory",
 		description:
-			"Edit your curated memory. MEMORY.md is your own durable notebook; USER.md holds facts about your human. " +
+			"Edit your curated memory. MEMORY.md is your durable notebook (knowledge, decisions, learnings); USER.md holds durable facts about your human (role, timezone, working style, standing constraints). Save only what will still matter next session. " +
 			"(Your SOUL.md — who you are — is a free-form file you rewrite with the bash tool instead.) " +
 			"Edits are saved immediately but only appear in your prompt on your next session. Keep entries concise.",
 		parameters: memorySchema,
