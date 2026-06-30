@@ -44,6 +44,7 @@ import {
 	createBashExecutionMessage,
 	createCompactionSummaryMessage,
 	createHostEnvironment,
+	type DaemonSessionDetail,
 	type EditorFactory,
 	ensureTool,
 	executeBash,
@@ -91,6 +92,7 @@ import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
+import { type SessionInfo, SessionSelectorComponent } from "./components/session-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
@@ -136,6 +138,22 @@ export interface ChatViewOptions {
 
 function isAssistantMessage(message: AgentMessage): message is AssistantMessage {
 	return (message as { role?: string }).role === "assistant";
+}
+
+/** Map the daemon's rich session record onto the selector's `SessionInfo` (path keyed on the JSONL file). */
+function daemonSessionToInfo(detail: DaemonSessionDetail): SessionInfo {
+	return {
+		path: detail.sessionFile,
+		id: detail.sessionId,
+		cwd: detail.cwd,
+		name: detail.name,
+		parentSessionPath: detail.parentSessionFile,
+		created: new Date(detail.createdAt),
+		modified: new Date(detail.modifiedAt),
+		messageCount: detail.messageCount,
+		firstMessage: detail.firstMessage,
+		allMessagesText: detail.allMessagesText,
+	};
 }
 
 /** A message typed while a compaction was running, flushed once it ends. */
@@ -552,6 +570,12 @@ export class ChatView extends Container implements AppView {
 			await this.handleNewCommand();
 			return;
 		}
+		// `/sessions` — open the resume selector and switch to another session of this agent.
+		if (trimmed === "/sessions") {
+			this.editor.setText("");
+			await this.showSessionSelector();
+			return;
+		}
 		// `/compact [instructions]` — compact the session history.
 		if (trimmed === "/compact" || trimmed.startsWith("/compact ")) {
 			const customInstructions = trimmed.startsWith("/compact ") ? trimmed.slice(9).trim() || undefined : undefined;
@@ -742,6 +766,62 @@ export class ChatView extends Container implements AppView {
 		}
 		try {
 			const sessionId = await this.ctx.createSession();
+			await this.ctx.switchSession(sessionId);
+		} catch (error) {
+			this.appendErrorLine(error instanceof Error ? error.message : String(error));
+			this.ui.requestRender();
+		}
+	}
+
+	/**
+	 * `/sessions` — open the resume selector over this agent's stored sessions. Selecting one switches the
+	 * visible chat to it; rename/delete route through the daemon. The list is fetched when the selector
+	 * opens and re-fetched after a rename/delete (the loader rebuilds the path→id map each call).
+	 */
+	private async showSessionSelector(): Promise<void> {
+		const currentSessionFilePath = this.session.getSessionFile();
+		const byPath = new Map<string, string>();
+		const loadSessions = async (): Promise<SessionInfo[]> => {
+			const details = await this.ctx.listSessions();
+			byPath.clear();
+			for (const detail of details) byPath.set(detail.sessionFile, detail.sessionId);
+			return details.map(daemonSessionToInfo);
+		};
+		this.showSelector((done) => {
+			const selector = new SessionSelectorComponent(
+				loadSessions,
+				(sessionPath) => {
+					done();
+					const id = byPath.get(sessionPath);
+					if (id) void this.handleResumeSession(id);
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+				() => {},
+				() => this.ui.requestRender(),
+				{
+					keybindings: this.keybindings,
+					showRenameHint: true,
+					renameSession: async (sessionPath, name) => {
+						const id = byPath.get(sessionPath);
+						if (id && name) await this.session.renameSession(id, name);
+					},
+					deleteSession: async (sessionPath) => {
+						const id = byPath.get(sessionPath);
+						if (id) await this.session.deleteSession(id);
+					},
+				},
+				currentSessionFilePath,
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	/** Switch the visible chat to the chosen session (the App swaps the ChatView). */
+	private async handleResumeSession(sessionId: string): Promise<void> {
+		try {
 			await this.ctx.switchSession(sessionId);
 		} catch (error) {
 			this.appendErrorLine(error instanceof Error ? error.message : String(error));

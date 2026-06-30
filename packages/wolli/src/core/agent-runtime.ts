@@ -55,7 +55,7 @@ import {
 	getAgentIntegrationsPath,
 	getSessionsDir,
 } from "../config.ts";
-import type { AuthSelectorProvider } from "../types.ts";
+import type { AuthSelectorProvider, DaemonSessionDetail } from "../types.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { createAgentPluginManager } from "./agent-plugin-manager.ts";
 import { type AgentConfig, AgentSettingsManager, isDeployed } from "./agent-settings-manager.ts";
@@ -94,7 +94,14 @@ import type { ConfiguredPlugin } from "./plugin-manager.ts";
 import { type PromptTemplate, parseCommandArgs } from "./prompt-templates.ts";
 import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
 import { DefaultResourceLoader, loadProjectContextFiles } from "./resource-loader.ts";
-import { listAgentSessions, openAgentSession, type SessionInfo } from "./session.ts";
+import {
+	deleteAgentSession,
+	listAgentSessions,
+	listAgentSessionsDetail,
+	openAgentSession,
+	renameAgentSession,
+	type SessionInfo,
+} from "./session.ts";
 import { SessionManager } from "./session-manager.ts";
 import type { Skill } from "./skills.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
@@ -461,6 +468,11 @@ export class AgentRuntime {
 	/** Notify the daemon a session was renamed — called by the session's `setSessionName`. */
 	notifySessionRenamed(sessionId: string, sessionName: string): void {
 		this._sessionLifecycleHandler?.({ type: "renamed", sessionId, sessionName });
+	}
+
+	/** Notify the daemon a session was removed — used when deleting an idle (non-resident) session. */
+	notifySessionRemoved(sessionId: string): void {
+		this._sessionLifecycleHandler?.({ type: "removed", sessionId });
 	}
 
 	/**
@@ -910,6 +922,31 @@ export class AgentRuntime {
 	/** Stored sessions for this agent (newest first) — the ids `openSession(id)` accepts. */
 	listSessions(): Promise<SessionInfo[]> {
 		return listAgentSessions(this.options.name);
+	}
+
+	/** Stored sessions with the rich fields the resume selector renders — backs `GET /sessions/detail`. */
+	listSessionsDetail(): Promise<DaemonSessionDetail[]> {
+		return listAgentSessionsDetail(this.options.name);
+	}
+
+	/** Rename a stored session by id (resume selector). Persists the name and broadcasts the lifecycle frame. */
+	async renameSession(id: string, sessionName: string): Promise<void> {
+		await renameAgentSession(this.options.name, id, sessionName);
+		this.notifySessionRenamed(id, sessionName);
+	}
+
+	/**
+	 * Delete a stored session by id (resume selector). Evicts the resident copy first (which broadcasts the
+	 * removal), else broadcasts it directly, then unlinks the JSONL. The selector guards against the active
+	 * session; the daemon also refuses while a turn is streaming.
+	 */
+	async deleteSession(id: string): Promise<void> {
+		if (this._sessions.has(id)) {
+			await this.closeSession(id);
+		} else {
+			this.notifySessionRemoved(id);
+		}
+		await deleteAgentSession(this.options.name, id);
 	}
 
 	/**
