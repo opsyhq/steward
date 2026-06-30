@@ -793,7 +793,13 @@ export class ChatView extends Container implements AppView {
 				(sessionPath) => {
 					done();
 					const id = byPath.get(sessionPath);
-					if (id) void this.handleResumeSession(id);
+					// Selecting the session we're already in is a no-op: re-opening its cached SessionHandle
+					// would unmount this view and close that same handle's live stream, freezing the chat.
+					if (id && id !== this.session.sessionId) {
+						void this.handleResumeSession(id);
+					} else {
+						this.ui.requestRender();
+					}
 				},
 				() => {
 					done();

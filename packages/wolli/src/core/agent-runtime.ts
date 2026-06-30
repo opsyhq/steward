@@ -929,9 +929,17 @@ export class AgentRuntime {
 		return listAgentSessionsDetail(this.options.name);
 	}
 
-	/** Rename a stored session by id (resume selector). Persists the name and broadcasts the lifecycle frame. */
+	/**
+	 * Rename a stored session by id (resume selector). A resident session renames through its own writer
+	 * (shared storage — no tree fork); an idle one is renamed by reopening its file. Broadcasts the frame.
+	 */
 	async renameSession(id: string, sessionName: string): Promise<void> {
-		await renameAgentSession(this.options.name, id, sessionName);
+		const live = this._sessions.get(id);
+		if (live) {
+			await live.setSessionName(sessionName);
+		} else {
+			await renameAgentSession(this.options.name, id, sessionName);
+		}
 		this.notifySessionRenamed(id, sessionName);
 	}
 
@@ -1524,6 +1532,14 @@ export class AgentSession {
 	/** The live session's display name, or undefined when unnamed. */
 	getSessionName(): string | undefined {
 		return this.sessionManager.getSessionName();
+	}
+
+	/**
+	 * Rename this resident session by appending a `session_info` entry through its OWN writer, so the
+	 * rename rides the same storage/leaf the harness is using (no second file handle, no tree fork).
+	 */
+	async setSessionName(sessionName: string): Promise<void> {
+		await this.sessionManager.appendSessionInfo(sessionName);
 	}
 
 	/** Path to the live session's JSONL file, or undefined when not yet persisted. */

@@ -90,6 +90,16 @@ function extractTextContent(message: Message): string {
 		.join(" ");
 }
 
+/** Activity time for a user/assistant message: a numeric message timestamp when present, else the entry's. */
+function messageActivityTime(message: Message, entryTimestamp: string): number | undefined {
+	const msgTimestamp = (message as { timestamp?: number }).timestamp;
+	if (typeof msgTimestamp === "number") {
+		return msgTimestamp;
+	}
+	const t = new Date(entryTimestamp).getTime();
+	return Number.isNaN(t) ? undefined : t;
+}
+
 /**
  * Open one stored session and derive its rich `DaemonSessionDetail`. Field semantics mirror the
  * coding-agent `buildSessionInfo`: `messageCount` counts all message entries; `firstMessage` is the first
@@ -111,13 +121,13 @@ async function buildSessionDetail(
 		messageCount++;
 
 		const message = entry.message;
-		const entryTime = new Date(entry.timestamp).getTime();
-		if (!Number.isNaN(entryTime)) {
-			lastActivityTime = Math.max(lastActivityTime ?? 0, entryTime);
-		}
-
 		if (!isMessageWithContent(message)) continue;
 		if (message.role !== "user" && message.role !== "assistant") continue;
+
+		const activityTime = messageActivityTime(message, entry.timestamp);
+		if (typeof activityTime === "number") {
+			lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
+		}
 
 		const textContent = extractTextContent(message);
 		if (!textContent) continue;
