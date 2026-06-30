@@ -308,7 +308,7 @@ export type {
 	DaemonCommand,
 	DaemonControlEvent,
 	DaemonResponse,
-	DaemonSessionDetail,
+	DaemonSessionInfo,
 	DaemonSessionState,
 	DaemonSessionSummary,
 	ExtensionUIRequest,

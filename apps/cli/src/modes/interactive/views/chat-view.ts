@@ -44,7 +44,6 @@ import {
 	createBashExecutionMessage,
 	createCompactionSummaryMessage,
 	createHostEnvironment,
-	type DaemonSessionDetail,
 	type EditorFactory,
 	ensureTool,
 	executeBash,
@@ -138,22 +137,6 @@ export interface ChatViewOptions {
 
 function isAssistantMessage(message: AgentMessage): message is AssistantMessage {
 	return (message as { role?: string }).role === "assistant";
-}
-
-/** Map the daemon's rich session record onto the selector's `SessionInfo` (path keyed on the JSONL file). */
-function daemonSessionToInfo(detail: DaemonSessionDetail): SessionInfo {
-	return {
-		path: detail.sessionFile,
-		id: detail.sessionId,
-		cwd: detail.cwd,
-		name: detail.name,
-		parentSessionPath: detail.parentSessionFile,
-		created: new Date(detail.createdAt),
-		modified: new Date(detail.modifiedAt),
-		messageCount: detail.messageCount,
-		firstMessage: detail.firstMessage,
-		allMessagesText: detail.allMessagesText,
-	};
 }
 
 /** A message typed while a compaction was running, flushed once it ends. */
@@ -782,10 +765,11 @@ export class ChatView extends Container implements AppView {
 		const currentSessionFilePath = this.session.getSessionFile();
 		const byPath = new Map<string, string>();
 		const loadSessions = async (): Promise<SessionInfo[]> => {
-			const details = await this.ctx.listSessions();
+			const infos = await this.ctx.listSessions();
 			byPath.clear();
-			for (const detail of details) byPath.set(detail.sessionFile, detail.sessionId);
-			return details.map(daemonSessionToInfo);
+			for (const info of infos) byPath.set(info.path, info.id);
+			// The wire `DaemonSessionInfo` mirrors `SessionInfo` field-for-field; revive the two date strings.
+			return infos.map((info) => ({ ...info, created: new Date(info.created), modified: new Date(info.modified) }));
 		};
 		this.showSelector((done) => {
 			const selector = new SessionSelectorComponent(

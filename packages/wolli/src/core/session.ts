@@ -7,11 +7,11 @@
  */
 
 import type { Message, TextContent } from "@earendil-works/pi-ai";
-import type { AgentMessage } from "@opsyhq/agent";
+import type { AgentMessage, MessageEntry } from "@opsyhq/agent";
 import { type JsonlSessionMetadata, JsonlSessionRepo, type Session } from "@opsyhq/agent";
 import { NodeExecutionEnv } from "@opsyhq/agent/node";
 import { getSessionsDir, getWorkspaceDir } from "../config.ts";
-import type { DaemonSessionDetail } from "../types.ts";
+import type { DaemonSessionInfo } from "../types.ts";
 
 export interface OpenAgentSessionOptions {
 	/** Start a fresh session instead of resuming the latest. */
@@ -90,44 +90,48 @@ function extractTextContent(message: Message): string {
 		.join(" ");
 }
 
-/** Activity time for a user/assistant message: a numeric message timestamp when present, else the entry's. */
-function messageActivityTime(message: Message, entryTimestamp: string): number | undefined {
+function getMessageActivityTime(entry: MessageEntry): number | undefined {
+	const message = entry.message;
+	if (!isMessageWithContent(message)) return undefined;
+	if (message.role !== "user" && message.role !== "assistant") return undefined;
+
 	const msgTimestamp = (message as { timestamp?: number }).timestamp;
 	if (typeof msgTimestamp === "number") {
 		return msgTimestamp;
 	}
-	const t = new Date(entryTimestamp).getTime();
+
+	const t = new Date(entry.timestamp).getTime();
 	return Number.isNaN(t) ? undefined : t;
 }
 
-/**
- * Open one stored session and derive its rich `DaemonSessionDetail`. Field semantics mirror the
- * coding-agent `buildSessionInfo`: `messageCount` counts all message entries; `firstMessage` is the first
- * user text (else "(no messages)"); `allMessagesText` is the full user+assistant transcript joined (what
- * backs the selector's search); `modifiedAt` is the last message activity, falling back to `createdAt`.
- */
-async function buildSessionDetail(
+async function buildSessionInfo(
 	session: Session<JsonlSessionMetadata>,
 	metadata: JsonlSessionMetadata,
-): Promise<DaemonSessionDetail> {
+): Promise<DaemonSessionInfo> {
 	const entries = await session.getEntries();
 	let messageCount = 0;
 	let firstMessage = "";
 	const allMessages: string[] = [];
+	let name: string | undefined;
 	let lastActivityTime: number | undefined;
 
 	for (const entry of entries) {
+		// Extract session name (use latest, including explicit clears)
+		if (entry.type === "session_info") {
+			name = entry.name?.trim() || undefined;
+		}
+
 		if (entry.type !== "message") continue;
 		messageCount++;
+
+		const activityTime = getMessageActivityTime(entry);
+		if (typeof activityTime === "number") {
+			lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
+		}
 
 		const message = entry.message;
 		if (!isMessageWithContent(message)) continue;
 		if (message.role !== "user" && message.role !== "assistant") continue;
-
-		const activityTime = messageActivityTime(message, entry.timestamp);
-		if (typeof activityTime === "number") {
-			lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
-		}
 
 		const textContent = extractTextContent(message);
 		if (!textContent) continue;
@@ -138,20 +142,19 @@ async function buildSessionDetail(
 		}
 	}
 
-	const name = (await session.getSessionName())?.trim() || undefined;
 	const modified =
 		typeof lastActivityTime === "number" && lastActivityTime > 0
 			? new Date(lastActivityTime)
 			: new Date(metadata.createdAt);
 
 	return {
-		sessionId: metadata.id,
-		sessionFile: metadata.path,
-		parentSessionFile: metadata.parentSessionPath,
+		path: metadata.path,
+		id: metadata.id,
 		cwd: metadata.cwd,
-		createdAt: metadata.createdAt,
-		modifiedAt: modified.toISOString(),
 		name,
+		parentSessionPath: metadata.parentSessionPath,
+		created: metadata.createdAt,
+		modified: modified.toISOString(),
 		messageCount,
 		firstMessage: firstMessage || "(no messages)",
 		allMessagesText: allMessages.join(" "),
@@ -163,16 +166,16 @@ async function buildSessionDetail(
  * read its transcript (fine for the handful per agent, same cost pattern as `findSessions`), so this is
  * NOT on the hot snapshot path — it backs `GET /sessions/detail`, fetched once when the selector opens.
  */
-export async function listAgentSessionsDetail(name: string): Promise<DaemonSessionDetail[]> {
+export async function listAgentSessionsDetail(name: string): Promise<DaemonSessionInfo[]> {
 	const cwd = getWorkspaceDir(name);
 	const env = new NodeExecutionEnv({ cwd });
 	const repo = new JsonlSessionRepo({ fs: env, sessionsRoot: getSessionsDir(name) });
 	const metadatas = await repo.list({ cwd });
-	const details: DaemonSessionDetail[] = [];
+	const infos: DaemonSessionInfo[] = [];
 	for (const metadata of metadatas) {
-		details.push(await buildSessionDetail(await repo.open(metadata), metadata));
+		infos.push(await buildSessionInfo(await repo.open(metadata), metadata));
 	}
-	return details;
+	return infos;
 }
 
 /** Rename a stored session by id — appends a `session_info` entry, the same primitive a live session uses. */

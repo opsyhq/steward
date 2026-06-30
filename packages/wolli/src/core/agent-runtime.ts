@@ -55,7 +55,7 @@ import {
 	getAgentIntegrationsPath,
 	getSessionsDir,
 } from "../config.ts";
-import type { AuthSelectorProvider, DaemonSessionDetail } from "../types.ts";
+import type { AuthSelectorProvider, DaemonSessionInfo } from "../types.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { createAgentPluginManager } from "./agent-plugin-manager.ts";
 import { type AgentConfig, AgentSettingsManager, isDeployed } from "./agent-settings-manager.ts";
@@ -925,7 +925,7 @@ export class AgentRuntime {
 	}
 
 	/** Stored sessions with the rich fields the resume selector renders — backs `GET /sessions/detail`. */
-	listSessionsDetail(): Promise<DaemonSessionDetail[]> {
+	listSessionsDetail(): Promise<DaemonSessionInfo[]> {
 		return listAgentSessionsDetail(this.options.name);
 	}
 

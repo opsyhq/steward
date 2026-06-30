@@ -6,7 +6,7 @@
  * sole `tui.start()`/`stop()` live here.
  */
 
-import { type Agent, type DaemonSessionDetail, initTheme, type SessionHandle, type Wolli } from "@opsyhq/wolli";
+import { type Agent, type DaemonSessionInfo, initTheme, type SessionHandle, type Wolli } from "@opsyhq/wolli";
 import { type Component, Container, ProcessTerminal, setKeybindings, TUI } from "@opsyhq/tui";
 import { KeybindingsManager } from "../../keybindings-manager.ts";
 import { AgentView } from "./views/agent-view.ts";
@@ -43,7 +43,7 @@ export interface ViewContext {
 	/** Replace the visible chat with another session of the current agent (used by `/new` and deploy). */
 	switchSession: (sessionId: string) => Promise<void>;
 	/** The agent's stored sessions with the rich fields the resume selector renders. */
-	listSessions: () => Promise<DaemonSessionDetail[]>;
+	listSessions: () => Promise<DaemonSessionInfo[]>;
 }
 
 /** A page in the shell. Every view is a `Container` so it gets `render`/`addChild`/`clear` for free. */

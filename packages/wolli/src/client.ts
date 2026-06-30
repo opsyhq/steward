@@ -44,7 +44,7 @@ import type {
 	DaemonCommand,
 	DaemonControlEvent,
 	DaemonResponse,
-	DaemonSessionDetail,
+	DaemonSessionInfo,
 	DaemonSessionState,
 	DaemonSessionSummary,
 	ExtensionUIRequest,
@@ -273,11 +273,11 @@ export class Agent {
 	}
 
 	/** The stored sessions with the rich fields the resume selector renders — round-trips `GET /sessions/detail`. */
-	async listSessionsDetail(): Promise<DaemonSessionDetail[]> {
+	async listSessionsDetail(): Promise<DaemonSessionInfo[]> {
 		const response = await fetch(`${this.base}/sessions/detail`, {
 			headers: { authorization: `Bearer ${this.token}` },
 		});
-		return (await response.json()) as DaemonSessionDetail[];
+		return (await response.json()) as DaemonSessionInfo[];
 	}
 
 	/** Open (or return the cached) `SessionHandle` for a session id, opening its event stream. */
