@@ -2,7 +2,7 @@
 
 # Wolli
 
-**Create purposeful, self-extending AI agents.**
+**Create agents that grow around a purpose.**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![npm](https://img.shields.io/npm/v/wolli.svg)](https://www.npmjs.com/package/wolli)
@@ -16,10 +16,7 @@
 
 > **What is my purpose?**
 
-Wolli lets you create purposeful agents. That purpose becomes the organizing
-principle of an agent's life: it remembers across sessions, runs on a schedule,
-acts on events, and extends itself to do its job better over time, writing its
-own skills, integrations, and extensions as the work demands.
+Wolli lets you create agents that grow around a purpose. Each agent remembers across sessions, runs on schedules, reacts to events, and extends itself over time by writing the skills, integrations, and workflows it needs to do its job better.
 
 ## Install
 
