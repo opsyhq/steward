@@ -173,7 +173,12 @@ export async function listAgentSessionsDetail(name: string): Promise<DaemonSessi
 	const metadatas = await repo.list({ cwd });
 	const infos: DaemonSessionInfo[] = [];
 	for (const metadata of metadatas) {
-		infos.push(await buildSessionInfo(await repo.open(metadata), metadata));
+		try {
+			infos.push(await buildSessionInfo(await repo.open(metadata), metadata));
+		} catch {
+			// Skip an unreadable/corrupt session rather than failing the whole list — coding-agent's
+			// buildSessionInfo does this by returning null from its own try/catch and filtering the nulls out.
+		}
 	}
 	return infos;
 }
