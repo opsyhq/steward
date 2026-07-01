@@ -29,6 +29,11 @@
 		"typescript": "5.9.3"
 	},
 	"pnpm": {
+		"onlyBuiltDependencies": [
+			"@tailwindcss/oxide",
+			"esbuild",
+			"lightningcss"
+		],
 		"overrides": {
 			"rimraf": "6.1.2",
 			"gaxios>rimraf": "6.1.2"

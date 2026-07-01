@@ -28,7 +28,11 @@
 			"packages/*/src/**/*.ts",
 			"packages/*/test/**/*.ts",
 			"packages/wolli/examples/**/*.ts",
+			"apps/marketing/src/**/*.ts",
+			"apps/marketing/src/**/*.tsx",
+			"apps/marketing/vite.config.ts",
 			"!packages/coding-agent",
+			"!apps/marketing/src/routeTree.gen.ts",
 			"!**/node_modules/**/*",
 			"!**/dist/**/*",
 			"!**/*.generated.ts"
