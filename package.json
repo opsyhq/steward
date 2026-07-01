@@ -32,7 +32,8 @@
 		"onlyBuiltDependencies": [
 			"@tailwindcss/oxide",
 			"esbuild",
-			"lightningcss"
+			"lightningcss",
+			"workerd"
 		],
 		"overrides": {
 			"rimraf": "6.1.2",

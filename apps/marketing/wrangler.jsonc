@@ -1,0 +1,14 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "wolli-marketing",
+	"compatibility_date": "2026-07-01",
+	"compatibility_flags": ["nodejs_compat"],
+	"main": "@tanstack/react-start/server-entry",
+	"routes": [
+		{ "pattern": "wolli.dev", "custom_domain": true },
+		{ "pattern": "www.wolli.dev", "custom_domain": true }
+	],
+	"observability": {
+		"enabled": true
+	}
+}
