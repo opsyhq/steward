@@ -10,7 +10,8 @@ import { defineConfig } from "vite";
 const config = defineConfig({
 	resolve: { tsconfigPaths: true },
 	plugins: [
-		cloudflare({ viteEnvironment: { name: "ssr" } }),
+		// Cloudflare's plugin is incompatible with Vitest's SSR env, so skip it under test.
+		...(process.env.VITEST ? [] : [cloudflare({ viteEnvironment: { name: "ssr" } })]),
 		devtools(),
 		tailwindcss(),
 		tanstackStart({ prerender: { enabled: true, crawlLinks: true } }),
